@@ -1,0 +1,64 @@
+name: pet_clean
+description: Pet Clean app
+publish_to: "none"
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  shared_preferences_android: ^2.4.12
+  path_provider_android: ^2.2.18
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # Camera
+  camera: 0.11.2
+
+  # Ads
+  google_mobile_ads: 6.0.0
+
+  # Share / Storage
+  share_plus: 11.1.0
+  path_provider: 2.1.5
+  shared_preferences: 2.5.3
+
+  # (必要なら) WebView
+  webview_flutter: 4.13.0
+
+  cupertino_icons: ^1.0.5
+  screenshot: 3.0.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1   # ← アイコン再生成用
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/app_icon.png
+    - assets/images/top_pet.png
+    - assets/images/dog.png
+    - assets/images/cat.png
+    - assets/images/rabbit.png
+    - assets/images/hamster.png
+    - assets/images/bird.png
+    - assets/images/ferret.png
+    - assets/images/horse.png
+    - assets/images/other_cow.png
+    - assets/images/other_elephant.png
+    - assets/images/other_monkey.png
+    - assets/images/other_panda.png
+    - assets/images/axolotl.png
+    - assets/images/sugar_glider.png
+    - assets/comments.json
+
+# ランチャーアイコン（assets/images/app_icon.png を使用）
+flutter_icons:
+  android: true
+  ios: false
+  image_path: assets/images/app_icon.png
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: assets/images/app_icon.png
+

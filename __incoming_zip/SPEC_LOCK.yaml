@@ -1,0 +1,44 @@
+# SPEC_LOCK.yaml (v2025-08-21)
+version: 2025.08.21
+
+inventory_app_gemini:
+  platform: Flutter
+  paths:
+    screens_dir: lib/screens
+  roles_and_nav:
+    - owner: 全メニュー/全権限、Admin/Staffへ切替可
+    - admin: Staffへ切替可（Owner不可）
+    - staff: 上位へ不可
+  invariants:
+    - ヘッダに「現在の店舗名」「あなたの権限」を常時表示
+    - 商品マスタは組織単一。編集は数量/基準在庫以外は全店舗へ反映
+    - 数量直設定ダイアログ（理由任意）→ 調整ログ記録
+    - 発注フロー: staff申請→admin正式発注→在庫反映→PDF生成
+    - 店舗切替: ログイン後も SelectStorePage に戻れる
+    - FCMトークンは staff/admin/owner ログイン時に保存
+  ui_requirements:
+    - InventoryListPage に「在庫切れのみ」「商品名検索」「昇順/降順」あり
+    - 商品タップ→ product_order_history_page に遷移
+  code_policy:
+    - 出力はフルファイル差し替えのみ
+    - 既存の画面名・引数・ファイル配置を変えない（必要時は明示の移行手順を先に提示）
+
+pet_clean:
+  platform: Flutter (Android/iOS)
+  packages:
+    screenshot: ^1.3.0
+    camera: required
+  assets:
+    comments: assets/comments.json   # 約7000件、{owner},{pet}プレースホルダ
+    images_dir: assets/images
+  flow:
+    - name_input_page: ownerName/petName 必須入力
+    - pet_selection_page: species/personality 選択し preview_page に渡す
+    - preview_page: 背景はカメラ映像、しゃべってボタンが主、共有は端にアイコン
+  invariants:
+    - comments.json を comment_loader.dart 経由で読み込み
+    - 方言変換は軽め（初期は関西弁のみ対応、将来拡張）
+    - デスクトップ対応しない（モバイル専用）
+  code_policy:
+    - 出力はフルファイル差し替えのみ
+    - 既存UI配色（水色基調）と配置を崩さない

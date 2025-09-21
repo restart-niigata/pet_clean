@@ -1,0 +1,12 @@
+# tools/dedupe.ps1 の優先規則と同義のドキュメント（将来のSPEC_LOCK兼ねる）
+prefer:
+  comments_loader.dart: lib/utils/comments_loader.dart
+  comment_service.dart: lib/utils/comment_service.dart
+  species_assets.dart:  lib/data/species_assets.dart
+  ad_manager.dart:      lib/ads/ad_manager.dart
+  comments_repository.dart: lib/repositories/comments_repository.dart
+notes:
+  - ads 配下が広告の正、utils配下の重複は退避
+  - data 配下が定義の正、services配下の重複は退避
+  - コメント導線は utils/comments_loader.dart を正
+  - pages/ は main.dart からの到達有無で残す

@@ -1,0 +1,50 @@
+name: pet_clean
+description: Pet Clean app
+publish_to: "none"
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Camera
+  camera: ^0.10.6
+
+  # Ads
+  google_mobile_ads: ^5.3.1
+
+  # Share / Storage
+  share_plus: ^7.2.2
+  path_provider: ^2.1.5
+  shared_preferences: ^2.0.0
+
+  # (必要なら) WebView
+  webview_flutter: ^4.0.0
+
+  cupertino_icons: ^1.0.5
+  screenshot: ^3.0.0
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/app_icon.png
+    - assets/images/top_pet.png
+    - assets/images/dog.png
+    - assets/images/cat.png
+    - assets/images/rabbit.png
+    - assets/images/hamster.png
+    - assets/images/bird.png
+    - assets/images/ferret.png
+    - assets/images/horse.png
+    - assets/images/other_cow.png
+    - assets/images/other_elephant.png
+    - assets/images/other_monkey.png
+    - assets/images/other_panda.png
+    - assets/images/axolotl.png
+    - assets/images/sugar_glider.png
+    - assets/comments.json
