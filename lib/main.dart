@@ -1,35 +1,29 @@
-// lib/main.dart  ――― 全差し替え ―――
+// lib/main.dart
 import 'package:flutter/material.dart';
-import 'package:pet_clean/utils/ad_manager.dart';
 import 'pages/name_input_page.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // 起動時に一度だけインタースティシャルを事前ロード（表示はしない）
-  await AdManager.loadInterstitial();
-  runApp(const MyApp());
+  runApp(const PetCleanApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class PetCleanApp extends StatelessWidget {
+  const PetCleanApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final baseTheme = ThemeData(
-      useMaterial3: true,
-      colorSchemeSeed: const Color(0xFF78A7FF),
-      brightness: Brightness.light,
-      textTheme: const TextTheme(
-        bodyLarge: TextStyle(fontSize: 18),
-        bodyMedium: TextStyle(fontSize: 16),
-        labelLarge: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-      ),
-    );
-
     return MaterialApp(
       title: 'PetClean',
       debugShowCheckedModeBanner: false,
-      theme: baseTheme,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF4C72FF)),
+        useMaterial3: true,
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(fontSize: 18),
+          titleLarge: TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
+          labelLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+      ),
       home: const NameInputPage(),
     );
   }

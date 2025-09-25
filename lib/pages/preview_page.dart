@@ -1,4 +1,6 @@
-﻿// lib/pages/preview_page.dart 共有後も必ず撮影画面に留める（ナビゲーション不変更）
+﻿// lib/pages/preview_page.dart
+// 撮影画面：コメント循環・方言変換・共有/保存・下部バナー常時表示（全差し替え）
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -9,11 +11,11 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:screenshot/screenshot.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../services/ad_service.dart';
+import '../widgets/banner_ad_view.dart';
 
 class PreviewPage extends StatefulWidget {
   final String ownerName;
@@ -39,7 +41,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   CameraController? _controller;
   Future<void>? _initFuture;
 
-  // コメント
+  // コメント制御
   final _rnd = Random();
   String _comment = '';
   bool _showComment = false;
@@ -59,7 +61,6 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _initCamera();
     _startCommentCycle();
-    AdService.loadInterstitial();
   }
 
   @override
@@ -75,8 +76,8 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       if (_controller == null || !_controller!.value.isInitialized) {
         await _initCamera();
-      } else {
-        if (mounted) setState(() {});
+      } else if (mounted) {
+        setState(() {});
       }
     }
   }
@@ -105,7 +106,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     }
   }
 
-  // -------- comments.json 読み込み/選択 --------
+  // ---------- comments.json 読み込み ----------
   Future<void> _ensureCommentsLoaded() async {
     if (_commentsByKey != null || _commentsTried) return;
     _commentsTried = true;
@@ -131,7 +132,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         }
       }
       if (out.isNotEmpty) _commentsByKey = out;
-    } catch (_) {}
+    } catch (_) {/* フォールバックに任せる */}
   }
 
   Future<String> _effectiveDialect() async {
@@ -233,7 +234,6 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     return raw;
   }
 
-  // 句読点や行末にマッチ
   static final _endPunct = r'(?:[。！!？?]|$)';
   String _applyDialect(String text, String dialect) {
     final d = _normalizeDialect(dialect);
@@ -270,7 +270,6 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     if (size == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
-    // Cameraプラグインは横基準のため width/height を入れ替えて BoxFit.cover
     final double previewW = size.height.toDouble();
     final double previewH = size.width.toDouble();
     return ColoredBox(
@@ -288,56 +287,41 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     if (_shareBusy) return;
     setState(() => _shareBusy = true);
     try {
-      await AdService.runWithInterstitial(_captureShareAndSave);
+      await _initFuture;
+      final Uint8List? bytes = await _shot.capture(pixelRatio: 1.5);
+      if (bytes == null) throw 'スクリーンショットに失敗しました';
+
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-');
+
+      final docs = await getApplicationDocumentsDirectory();
+      await Directory(docs.path).create(recursive: true);
+      final savePath = '${docs.path}/pet_clean_$ts.jpg';
+      await File(savePath).writeAsBytes(bytes);
+
+      final tmp = await getTemporaryDirectory();
+      final sharePath = '${tmp.path}/pet_clean_$ts.jpg';
+      await File(sharePath).writeAsBytes(bytes);
+
+      final ShareResult res =
+          await Share.shareXFiles([XFile(sharePath, mimeType: 'image/jpeg')]);
+
+      if (!mounted) return;
+
+      final name = File(savePath).uri.pathSegments.last;
+      final msg = (res.status == ShareResultStatus.success)
+          ? '保存しました: $name'
+          : '保存しました（共有はキャンセル）: $name';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     } finally {
       if (mounted) setState(() => _shareBusy = false);
     }
-  }
-
-  Future<void> _captureShareAndSave() async {
-    await _initFuture; // 初期化待ち
-    final Uint8List? bytes = await _shot.capture(pixelRatio: 1.5);
-    if (bytes == null) throw 'スクリーンショットに失敗しました';
-
-    final ts = DateTime.now()
-        .toIso8601String()
-        .replaceAll(':', '-')
-        .replaceAll('.', '-');
-
-    final docs = await getApplicationDocumentsDirectory();
-    await Directory(docs.path).create(recursive: true);
-    final savePath = '${docs.path}/pet_clean_$ts.jpg';
-    await File(savePath).writeAsBytes(bytes);
-
-    final tmp = await getTemporaryDirectory();
-    final sharePath = '${tmp.path}/pet_clean_$ts.jpg';
-    await File(sharePath).writeAsBytes(bytes);
-
-    // 共有（ナビゲーションは触らない）
-    final ShareResult res =
-        await Share.shareXFiles([XFile(sharePath, mimeType: 'image/jpeg')]);
-
-    if (!mounted) return;
-
-    // 必要に応じてプレビュー復帰
-    if (_controller == null || !_controller!.value.isInitialized) {
-      await _initCamera();
-    } else {
-      setState(() {});
-    }
-
-    final name = File(savePath).uri.pathSegments.last;
-    final msg = (res.status == ShareResultStatus.success)
-        ? '保存しました: $name'
-        : '保存しました（共有はキャンセル）: $name';
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   Widget _speechBubble(String text) {
     return Align(
       alignment: Alignment.topCenter,
       child: Container(
-        margin: const EdgeInsets.only(top: 88), // 少し下げる
+        margin: const EdgeInsets.only(top: 88),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.92),
@@ -355,11 +339,18 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final titleText =
-        (widget.petName.isNotEmpty) ? '${widget.petName}を画面内に入れてね' : 'ペットを画面内に入れてね';
+    final titleText = (widget.petName.isNotEmpty)
+        ? '${widget.petName}を画面内に入れてね'
+        : 'ペットを画面内に入れてね';
 
     return Scaffold(
-      appBar: AppBar(title: Text(titleText)),
+      appBar: AppBar(
+        title: FittedBox(
+          fit: BoxFit.scaleDown, // 折り返し禁止で縮小許可
+          alignment: Alignment.centerLeft,
+          child: Text(titleText, maxLines: 1),
+        ),
+      ),
       body: FutureBuilder<void>(
         future: _initFuture,
         builder: (_, snap) {
@@ -381,19 +372,33 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
           );
         },
       ),
+
+      // ===== 撮影画面 下部：バナー広告 + 共有ボタン（常時表示） =====
       bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-          child: SizedBox(
-            height: 56,
-            child: ElevatedButton(
-              onPressed: _shareBusy ? null : _onShare,
-              child: _shareBusy
-                  ? const SizedBox(
-                      width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('共有'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // バナー広告（←これが無くなる問題を修正）
+            BannerAdView(), // ← 非 const で配置
+
+            const SizedBox(height: 8),
+
+            // 共有ボタン
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: SizedBox(
+                height: 56,
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _shareBusy ? null : _onShare,
+                  child: _shareBusy
+                      ? const SizedBox(
+                          width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('共有'),
+                ),
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
