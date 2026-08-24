@@ -41,6 +41,8 @@ class PreviewPage extends StatefulWidget {
 class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   CameraController? _controller;
   Future<void>? _initFuture;
+  bool _cameraAttempted = false;
+  String? _cameraError;
 
   // コメント制御
   final _rnd = Random();
@@ -87,8 +89,21 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   }
 
   Future<void> _initCamera() async {
+    final previousController = _controller;
+    _controller = null;
+    _initFuture = null;
+    if (mounted) {
+      setState(() {
+        _cameraAttempted = false;
+        _cameraError = null;
+      });
+    }
+    await previousController?.dispose();
     try {
       final cams = await availableCameras();
+      if (cams.isEmpty) {
+        throw CameraException('cameraNotFound', '利用可能なカメラがありません');
+      }
       final back = cams.firstWhere(
         (e) => e.lensDirection == CameraLensDirection.back,
         orElse: () => cams.first,
@@ -102,11 +117,19 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       _controller = ctrl;
       _initFuture = ctrl.initialize();
       await _initFuture;
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {
+          _cameraAttempted = true;
+          _cameraError = null;
+        });
+      }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('カメラ初期化エラー: $e')));
+      debugPrint('Camera initialization failed: $e');
+      setState(() {
+        _cameraAttempted = true;
+        _cameraError = e.toString();
+      });
     }
   }
 
@@ -299,6 +322,63 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     );
   }
 
+  static const Map<String, String> _speciesAssets = {
+    '犬': 'assets/images/dog.png',
+    '猫': 'assets/images/cat.png',
+    'ウサギ': 'assets/images/rabbit.png',
+    'ハムスター': 'assets/images/hamster.png',
+    '鳥': 'assets/images/bird.png',
+    'フクロモモンガ': 'assets/images/sugar_glider.png',
+    'フェレット': 'assets/images/ferret.png',
+    'ウーパールーパー': 'assets/images/axolotl.png',
+    '馬': 'assets/images/horse.png',
+    '象': 'assets/images/other_elephant.png',
+    'パンダ': 'assets/images/other_panda.png',
+    '牛': 'assets/images/other_cow.png',
+    '猿': 'assets/images/other_monkey.png',
+  };
+
+  Widget _demoCover() {
+    final asset = _speciesAssets[widget.species] ?? 'assets/images/top_pet.png';
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFFEAF2FF), Color(0xFFC9DCFF)],
+        ),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 76),
+            child: Image.asset(asset, fit: BoxFit.contain),
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 16,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.64),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                child: Text(
+                  'カメラが使えないため、デモ画像でお試し中です',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _onShare() async {
     if (_shareBusy) return;
     setState(() => _shareBusy = true);
@@ -383,22 +463,29 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
           alignment: Alignment.centerLeft,
           child: Text(titleText, maxLines: 1),
         ),
+        actions: [
+          if (_cameraError != null)
+            IconButton(
+              tooltip: 'カメラを再試行',
+              onPressed: _initCamera,
+              icon: const Icon(Icons.cameraswitch_outlined),
+            ),
+        ],
       ),
       body: FutureBuilder<void>(
         future: _initFuture,
         builder: (_, snap) {
-          if (_controller == null ||
-              snap.connectionState != ConnectionState.done) {
+          if (!_cameraAttempted &&
+              (_controller == null ||
+                  snap.connectionState != ConnectionState.done)) {
             return const Center(child: CircularProgressIndicator());
           }
-          if (!_controller!.value.isInitialized) {
-            return const Center(child: Text('カメラを初期化できませんでした'));
-          }
+          final cameraReady = _controller?.value.isInitialized ?? false;
           return Screenshot(
             controller: _shot,
             child: Stack(
               children: [
-                _cameraCover(),
+                if (cameraReady) _cameraCover() else _demoCover(),
                 if (_showComment && _comment.isNotEmpty)
                   IgnorePointer(child: _speechBubble(_comment)),
               ],

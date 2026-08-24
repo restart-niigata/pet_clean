@@ -2,6 +2,22 @@
 
 カメラに映したペットが、性格や方言に合わせてひとこと話すFlutterアプリです。
 
+## Windows / Mac 共通の開発環境
+
+Flutter `3.35.6` を基準にしています。FVMを使う場合は、リポジトリ直下の
+`.fvmrc` から同じバージョンを導入できます。
+
+```powershell
+fvm install
+fvm flutter pub get
+fvm flutter run
+```
+
+FVMを使わない場合は、Flutter stableを用意して `flutter pub get`、
+`flutter run` の順に実行します。`.gitattributes` でソースの改行コードを
+LFに統一しているため、WindowsとMacを行き来しても不要な全行差分が出ません。
+APIキー、Firebaseサービスアカウント、署名鍵はGitHubへ追加しないでください。
+
 ## AIコメント連携
 
 AIコメントは、生成AIへ直接接続せず、自前のバックエンドを経由します。APIキーを
