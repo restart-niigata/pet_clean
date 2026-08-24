@@ -1,11 +1,11 @@
 {
-    "name": "pet_clean",
-    "short_name": "pet_clean",
+    "name": "ぺっとーく",
+    "short_name": "ぺっとーく",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "ペットが性格や方言に合わせてひとこと話すアプリです。",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

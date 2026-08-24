@@ -1,20 +1,21 @@
-﻿// lib/pages/preview_page.dart
+// lib/pages/preview_page.dart
 // 撮影画面：コメント循環・方言変換・共有/保存・下部バナー常時表示（全差し替え）
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:path_provider/path_provider.dart';
 import 'package:screenshot/screenshot.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/pet_talk_ai_service.dart';
+import '../services/ad_service.dart';
+import '../services/share_file.dart';
 import '../widgets/banner_ad_view.dart';
 
 class PreviewPage extends StatefulWidget {
@@ -49,6 +50,9 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   Map<String, List<String>>? _commentsByKey;
   bool _commentsTried = false;
   final Set<String> _shownComments = <String>{};
+  final PetTalkAiService _aiService = PetTalkAiService();
+  String? _queuedAiComment;
+  bool _aiLoading = false;
   static const Duration _commentVisible = Duration(seconds: 5);
 
   // スクショ/共有
@@ -60,7 +64,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initCamera();
-    _startCommentCycle();
+    unawaited(_prefetchAiComment());
   }
 
   @override
@@ -154,6 +158,12 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     final pet = widget.petName.isNotEmpty ? widget.petName : 'ペット';
     final effDialect = await _effectiveDialect();
 
+    final queuedAiComment = _queuedAiComment;
+    if (queuedAiComment != null) {
+      _queuedAiComment = null;
+      return queuedAiComment;
+    }
+
     if (_commentsByKey != null && _commentsByKey!.isNotEmpty) {
       final keySel = '${widget.species}_${widget.personality}';
       final prefix = '${widget.species}_';
@@ -183,6 +193,27 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     return _applyDialect('$owner！ $pet といっしょに撮ろう！', effDialect);
   }
 
+  Future<void> _prefetchAiComment() async {
+    if (_aiLoading || _queuedAiComment != null) return;
+    _aiLoading = true;
+    try {
+      final effDialect = await _effectiveDialect();
+      final aiComment = await _aiService.generateComment(
+        species: widget.species,
+        personality: widget.personality,
+        dialect: effDialect,
+      );
+      if (aiComment == null || !mounted) return;
+
+      final owner = widget.ownerName.isNotEmpty ? widget.ownerName : '飼い主さん';
+      final pet = widget.petName.isNotEmpty ? widget.petName : 'ペット';
+      _queuedAiComment =
+          aiComment.replaceAll('{owner}', owner).replaceAll('{pet}', pet);
+    } finally {
+      _aiLoading = false;
+    }
+  }
+
   String? _pickUniqueFrom(List<String> pool) {
     if (pool.isEmpty) return null;
     final candidates = pool.where((s) => !_shownComments.contains(s)).toList();
@@ -195,34 +226,17 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     return chosen;
   }
 
-  void _startCommentCycle() async {
-    await _showOneComment();
-  }
-
   Future<void> _showOneComment() async {
     _commentTimer?.cancel();
     _comment = await _pickComment();
     if (!mounted) return;
     setState(() => _showComment = true);
+    unawaited(_prefetchAiComment());
 
     _commentTimer = Timer(_commentVisible, () {
       if (!mounted) return;
       setState(() => _showComment = false);
-      final wait = _pickGapAfterHide();
-      _commentTimer = Timer(wait, () {
-        if (!mounted) return;
-        _showOneComment();
-      });
     });
-  }
-
-  Duration _pickGapAfterHide() {
-    final p = _rnd.nextDouble();
-    if (p < 0.35) return const Duration(seconds: 5);
-    if (p < 0.65) return const Duration(seconds: 10);
-    if (p < 0.90) return const Duration(seconds: 15);
-    if (p < 0.95) return const Duration(seconds: 2);
-    return const Duration(seconds: 30);
   }
 
   String _normalizeDialect(String raw) {
@@ -242,6 +256,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     void rep(String pattern, String r) {
       t = t.replaceAll(RegExp(pattern), r);
     }
+
     if (d == '関西弁') {
       rep('だよ$_endPunct', 'やで');
       rep('だな$_endPunct', 'やな');
@@ -277,7 +292,8 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       child: SizedBox.expand(
         child: FittedBox(
           fit: BoxFit.cover,
-          child: SizedBox(width: previewW, height: previewH, child: CameraPreview(c)),
+          child: SizedBox(
+              width: previewW, height: previewH, child: CameraPreview(c)),
         ),
       ),
     );
@@ -291,27 +307,39 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       final Uint8List? bytes = await _shot.capture(pixelRatio: 1.5);
       if (bytes == null) throw 'スクリーンショットに失敗しました';
 
-      final ts = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-');
+      final ts = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .replaceAll('.', '-');
 
-      final docs = await getApplicationDocumentsDirectory();
-      await Directory(docs.path).create(recursive: true);
-      final savePath = '${docs.path}/pet_clean_$ts.jpg';
-      await File(savePath).writeAsBytes(bytes);
+      final prepared = await prepareShareFile(bytes, 'pet_clean_$ts.jpg');
 
-      final tmp = await getTemporaryDirectory();
-      final sharePath = '${tmp.path}/pet_clean_$ts.jpg';
-      await File(sharePath).writeAsBytes(bytes);
-
-      final ShareResult res =
-          await Share.shareXFiles([XFile(sharePath, mimeType: 'image/jpeg')]);
+      final ShareResult res = await SharePlus.instance.share(
+        ShareParams(
+          files: [prepared.file],
+          fileNameOverrides: [prepared.savedName],
+          downloadFallbackEnabled: true,
+        ),
+      );
 
       if (!mounted) return;
 
-      final name = File(savePath).uri.pathSegments.last;
-      final msg = (res.status == ShareResultStatus.success)
-          ? '保存しました: $name'
-          : '保存しました（共有はキャンセル）: $name';
+      final msg = prepared.persisted
+          ? (res.status == ShareResultStatus.success
+              ? '保存しました: ${prepared.savedName}'
+              : '保存しました（共有はキャンセル）: ${prepared.savedName}')
+          : (res.status == ShareResultStatus.success
+              ? '共有しました'
+              : '共有をキャンセルしました');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      if (res.status == ShareResultStatus.success) {
+        unawaited(AdService.maybeShowAfterSuccessfulShare());
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存または共有に失敗しました: $error')),
+      );
     } finally {
       if (mounted) setState(() => _shareBusy = false);
     }
@@ -324,9 +352,14 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         margin: const EdgeInsets.only(top: 88),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.92),
+          color: Colors.white.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8)],
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.12),
+              blurRadius: 8,
+            )
+          ],
         ),
         child: Text(
           text,
@@ -354,7 +387,8 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       body: FutureBuilder<void>(
         future: _initFuture,
         builder: (_, snap) {
-          if (_controller == null || snap.connectionState != ConnectionState.done) {
+          if (_controller == null ||
+              snap.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
           }
           if (!_controller!.value.isInitialized) {
@@ -372,30 +406,43 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
           );
         },
       ),
-
-      // ===== 撮影画面 下部：バナー広告 + 共有ボタン（常時表示） =====
       bottomNavigationBar: SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // バナー広告（←これが無くなる問題を修正）
-            BannerAdView(), // ← 非 const で配置
-
+            const BannerAdView(),
             const SizedBox(height: 8),
-
-            // 共有ボタン
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: SizedBox(
-                height: 56,
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _shareBusy ? null : _onShare,
-                  child: _shareBusy
-                      ? const SizedBox(
-                          width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('共有'),
-                ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 56,
+                      child: FilledButton.icon(
+                        onPressed: _showOneComment,
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('しゃべって'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 56,
+                    height: 56,
+                    child: IconButton.filledTonal(
+                      tooltip: '写真を保存・共有',
+                      onPressed: _shareBusy ? null : _onShare,
+                      icon: _shareBusy
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.ios_share),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
