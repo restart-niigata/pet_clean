@@ -7,8 +7,9 @@ import 'package:url_launcher/url_launcher.dart';
 /// 同意が済んでいれば何も出さず、未同意なら全画面の同意 UI を表示。
 class LegalGate extends StatefulWidget {
   final Widget child;
+  final Future<void> Function()? onAccepted;
 
-  const LegalGate({super.key, required this.child});
+  const LegalGate({super.key, required this.child, this.onAccepted});
 
   @override
   State<LegalGate> createState() => _LegalGateState();
@@ -34,10 +35,13 @@ class _LegalGateState extends State<LegalGate> {
     final p = await SharedPreferences.getInstance();
     final accepted = p.getBool(_kAcceptedKey) ?? false;
     final ver = p.getInt(_kVersionKey) ?? 0;
+    if (!mounted) return;
+    final needConsent = !(accepted && ver == _kLegalVersion);
     setState(() {
-      _needConsent = !(accepted && ver == _kLegalVersion);
+      _needConsent = needConsent;
       _loading = false;
     });
+    if (!needConsent) await widget.onAccepted?.call();
   }
 
   Future<void> _accept() async {
@@ -46,8 +50,8 @@ class _LegalGateState extends State<LegalGate> {
     await p.setInt(_kVersionKey, _kLegalVersion);
     await p.setInt(_kAcceptedAtKey, DateTime.now().millisecondsSinceEpoch);
     if (!mounted) return;
-    // ここがポイント：Navigator で遷移せず、ただレイヤーを消すだけ
     setState(() => _needConsent = false);
+    await widget.onAccepted?.call();
   }
 
   @override
@@ -56,7 +60,7 @@ class _LegalGateState extends State<LegalGate> {
     return Stack(
       children: [
         widget.child,
-        if (!_loading && _needConsent) const _ConsentOverlay(),
+        if (!_loading && _needConsent) _ConsentOverlay(onAccepted: _accept),
         if (_loading)
           const ColoredBox(
             color: Colors.black54,
@@ -67,11 +71,11 @@ class _LegalGateState extends State<LegalGate> {
   }
 }
 
-/// 全画面の同意 UI（会社名・リンク・チェック → ボタン有効）
-/// ※ _accept は上位 State にあるので、簡易的に InheritedWidget で渡すより
-///   コールバックを使わず、Overlay 自体で SharedPreferences を触って完結させる実装にしています。
+/// 全画面の同意 UI（会社名・リンク・チェック → ボタン有効）。
 class _ConsentOverlay extends StatefulWidget {
-  const _ConsentOverlay();
+  const _ConsentOverlay({required this.onAccepted});
+
+  final Future<void> Function() onAccepted;
 
   @override
   State<_ConsentOverlay> createState() => _ConsentOverlayState();
@@ -104,22 +108,7 @@ class _ConsentOverlayState extends State<_ConsentOverlay> {
   Future<void> _doAccept() async {
     setState(() => _accepting = true);
     try {
-      final p = await SharedPreferences.getInstance();
-      await p.setBool('legal.accepted', true);
-      await p.setInt('legal.version', 1);
-      await p.setInt('legal.acceptedAt', DateTime.now().millisecondsSinceEpoch);
-      if (!mounted) return;
-      // 自分自身を消すには、上位 Stack の再ビルドが必要 → 簡易的に
-      // 「拒否→表示」「同意→非表示」のフラグを LocalHistory 用に使う代わりに
-      // Navigator を触らず、親を再描画させるために setState で透明化 → その後 pop も不要。
-      Navigator.of(context).pushReplacement(
-        PageRouteBuilder(
-          opaque: false,
-          pageBuilder: (_, __, ___) => const _AcceptedPing(),
-          transitionDuration: Duration.zero,
-          reverseTransitionDuration: Duration.zero,
-        ),
-      );
+      await widget.onAccepted();
     } finally {
       if (mounted) setState(() => _accepting = false);
     }
@@ -131,107 +120,89 @@ class _ConsentOverlayState extends State<_ConsentOverlay> {
     final maxW = 560.0;
 
     return ColoredBox(
-      color: Colors.black.withOpacity(0.55),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxW),
-          child: Material(
-            color: theme.colorScheme.surface,
-            borderRadius: BorderRadius.circular(16),
-            elevation: 8,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('ご利用にあたって',
-                      style: theme.textTheme.titleLarge
-                          ?.copyWith(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  const Text(
-                    '本アプリの提供者は「株式会社Ｒｅ，ｓｔＡｒｔ」です。\n'
-                    'プライバシーポリシーと利用規約をご確認のうえ、同意してください。',
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 12,
-                    runSpacing: 8,
+      color: Colors.black.withValues(alpha: 0.55),
+      child: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxW),
+              child: Material(
+                color: theme.colorScheme.surface,
+                borderRadius: BorderRadius.circular(16),
+                elevation: 8,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      OutlinedButton(
-                        onPressed: () => _open(_privacyUrl),
-                        child: const Text('プライバシーポリシーを開く'),
+                      Text('ご利用にあたって',
+                          style: theme.textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                      const Text(
+                        '本アプリの提供者は「株式会社Ｒｅ，ｓｔＡｒｔ」です。\n'
+                        'プライバシーポリシーと利用規約をご確認のうえ、同意してください。',
+                        textAlign: TextAlign.center,
                       ),
-                      OutlinedButton(
-                        onPressed: () => _open(_termsUrl),
-                        child: const Text('利用規約を開く'),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 12,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton(
+                            onPressed: () => _open(_privacyUrl),
+                            child: const Text('プライバシーポリシーを開く'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () => _open(_termsUrl),
+                            child: const Text('利用規約を開く'),
+                          ),
+                          TextButton.icon(
+                            onPressed: _sendMail,
+                            icon: const Icon(Icons.mail_outline),
+                            label: const Text('お問い合わせ'),
+                          ),
+                        ],
                       ),
-                      TextButton.icon(
-                        onPressed: _sendMail,
-                        icon: const Icon(Icons.mail_outline),
-                        label: const Text('お問い合わせ'),
+                      const SizedBox(height: 8),
+                      CheckboxListTile(
+                        value: _checked,
+                        onChanged: (v) => setState(() => _checked = v ?? false),
+                        title: const Text('上記の内容を確認し、同意します'),
+                        controlAffinity: ListTileControlAffinity.leading,
+                      ),
+                      const SizedBox(height: 4),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: FilledButton(
+                          onPressed:
+                              (_checked && !_accepting) ? _doAccept : null,
+                          child: _accepting
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Text('同意してはじめる'),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '© 株式会社Ｒｅ，ｓｔＡｒｔ',
+                        style: theme.textTheme.bodySmall,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  CheckboxListTile(
-                    value: _checked,
-                    onChanged: (v) => setState(() => _checked = v ?? false),
-                    title: const Text('上記の内容を確認し、同意します'),
-                    controlAffinity: ListTileControlAffinity.leading,
-                  ),
-                  const SizedBox(height: 4),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: FilledButton(
-                      onPressed: (_checked && !_accepting) ? _doAccept : null,
-                      child: _accepting
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('同意してはじめる'),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '© 株式会社Ｒｅ，ｓｔＡｒｔ',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
+                ),
               ),
             ),
           ),
         ),
       ),
     );
-  }
-}
-
-/// 同意直後に親の Stack を再描画させ、ConsentOverlay を消すための“瞬間ページ”
-/// （透明・即リプレース戻り）
-class _AcceptedPing extends StatefulWidget {
-  const _AcceptedPing();
-
-  @override
-  State<_AcceptedPing> createState() => _AcceptedPingState();
-}
-
-class _AcceptedPingState extends State<_AcceptedPing> {
-  @override
-  void initState() {
-    super.initState();
-    // 1フレーム後に戻る（結果として親が再ビルドされ、_needConsent=false の状態で描画）
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      Navigator.of(context).pop();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return const SizedBox.shrink(); // 何も描画しない透明ページ
   }
 }

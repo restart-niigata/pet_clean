@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
-import '../services/ad_service.dart';            // ★ 追加：広告呼び出し
+import '../services/ad_service.dart'; // ★ 追加：広告呼び出し
 import '../widgets/banner_ad_view.dart';
 import 'pet_type_select_page.dart';
 import 'personality_select_page.dart';
@@ -28,11 +28,17 @@ class _NameInputPageState extends State<NameInputPage> {
   @override
   void initState() {
     super.initState();
+    _ownerCtrl.addListener(_onNamesChanged);
+    _petCtrl.addListener(_onNamesChanged);
     _restore();
-
-    // ★ 起動5回に1回のインステを表示（AdService側でカウント/先読み制御）
-    AdService.maybeShowLaunchInterstitialOn5th();
   }
+
+  void _onNamesChanged() {
+    if (mounted) setState(() {});
+  }
+
+  bool get _canStart =>
+      _ownerCtrl.text.trim().isNotEmpty && _petCtrl.text.trim().isNotEmpty;
 
   Future<void> _restore() async {
     final p = await SharedPreferences.getInstance();
@@ -73,6 +79,15 @@ class _NameInputPageState extends State<NameInputPage> {
     }
   }
 
+  Future<void> _showAdPrivacyOptions() async {
+    final message = await AdService.showPrivacyOptions();
+    if (message != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    }
+  }
+
   @override
   void dispose() {
     _ownerCtrl.dispose();
@@ -85,178 +100,199 @@ class _NameInputPageState extends State<NameInputPage> {
     const seed = Color(0xFF4C72FF);
     const bg = Color(0xFFF2F6FF);
 
-    final media = MediaQuery.of(context);
-    final limitedScale = media.textScaleFactor.clamp(0.9, 1.03);
-
-    return MediaQuery(
-      data: media.copyWith(textScaleFactor: limitedScale),
-      child: Scaffold(
-        backgroundColor: bg,
-        appBar: AppBar(
-          elevation: 0.5,
-          title: const FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text('あなたとペットちゃんの情報を入れてね', maxLines: 1),
-          ),
-          actions: [
-            PopupMenuButton<String>(
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        elevation: 0.5,
+        title: const FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text('あなたとペットちゃんの情報を入れてね', maxLines: 1),
+        ),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: AdService.privacyOptionsRequired,
+            builder: (_, showAdPrivacy, __) => PopupMenuButton<String>(
               onSelected: (v) {
                 switch (v) {
                   case 'privacy':
-                    _openUrl('https://restart-niigata.github.io/petclean-legal/privacy.html');
+                    _openUrl(
+                      'https://restart-niigata.github.io/petclean-legal/privacy.html',
+                    );
                     break;
                   case 'terms':
-                    _openUrl('https://restart-niigata.github.io/petclean-legal/terms.html');
+                    _openUrl(
+                      'https://restart-niigata.github.io/petclean-legal/terms.html',
+                    );
+                    break;
+                  case 'adPrivacy':
+                    _showAdPrivacyOptions();
                     break;
                   case 'reset':
                     _resetConsent();
                     break;
                 }
               },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'privacy', child: Text('プライバシーポリシー')),
-                PopupMenuItem(value: 'terms', child: Text('利用規約')),
-                PopupMenuItem(value: 'reset', child: Text('同意をリセット')),
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'privacy',
+                  child: Text('プライバシーポリシー'),
+                ),
+                const PopupMenuItem(
+                  value: 'terms',
+                  child: Text('利用規約'),
+                ),
+                if (showAdPrivacy)
+                  const PopupMenuItem(
+                    value: 'adPrivacy',
+                    child: Text('広告プライバシー設定'),
+                  ),
+                const PopupMenuItem(
+                  value: 'reset',
+                  child: Text('同意をリセット'),
+                ),
               ],
             ),
-          ],
-        ),
-        body: SafeArea(
-          child: LayoutBuilder(
-            builder: (_, c) {
-              final side = math.max(
-                96.0,
-                math.min(c.maxWidth - 28, (c.maxHeight - 52) * 0.24),
-              );
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (_, c) {
+            final side = math.max(
+              96.0,
+              math.min(c.maxWidth - 28, (c.maxHeight - 52) * 0.24),
+            );
 
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Column(
-                  children: [
-                    // 上部の正方形ロゴ（画面に合わせて自動調整）
-                    SizedBox(
-                      width: side,
-                      height: side,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: Image.asset(
-                          'assets/images/top_pet.png',
-                          fit: BoxFit.cover,
-                        ),
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Column(
+                children: [
+                  // 上部の正方形ロゴ（画面に合わせて自動調整）
+                  SizedBox(
+                    width: side,
+                    height: side,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Image.asset(
+                        'assets/images/top_pet.png',
+                        fit: BoxFit.cover,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                  ),
+                  const SizedBox(height: 8),
 
-                    // 入力＆選択
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        physics: const BouncingScrollPhysics(),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _label('あなたの名前（任意）', seed),
-                            _textBox(controller: _ownerCtrl, hint: 'あなたの名前'),
-                            const SizedBox(height: 8),
-
-                            _label('ペットの名前（任意）', seed),
-                            _textBox(controller: _petCtrl, hint: 'ペットの名前'),
-                            const SizedBox(height: 8),
-
-                            _label('種類', seed),
-                            _selectTileCompact(
-                              valueText: _species,
-                              onTap: () async {
-                                final v = await Navigator.of(context).push<String>(
-                                  MaterialPageRoute(
-                                    builder: (_) =>
-                                        PetTypeSelectPage(current: _species),
-                                  ),
-                                );
-                                if (v != null) setState(() => _species = v);
-                              },
-                            ),
-                            const SizedBox(height: 6),
-
-                            _label('性格', seed),
-                            _selectTileCompact(
-                              valueText: _personality,
-                              onTap: () async {
-                                final v = await Navigator.of(context).push<String>(
-                                  MaterialPageRoute(
-                                    builder: (_) => PersonalitySelectPage(
-                                      current: _personality,
-                                    ),
-                                  ),
-                                );
-                                if (v != null) setState(() => _personality = v);
-                              },
-                            ),
-                            const SizedBox(height: 6),
-
-                            _label('方言', seed),
-                            _selectTileCompact(
-                              valueText: _dialect,
-                              onTap: () async {
-                                final v = await Navigator.of(context).push<String>(
-                                  MaterialPageRoute(
-                                    builder: (_) =>
-                                        DialectSelectPage(current: _dialect),
-                                  ),
-                                );
-                                if (v != null) setState(() => _dialect = v);
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    // 開始ボタン（画面下に固定）
-                    SizedBox(
-                      width: double.infinity,
-                      height: 50,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: seed,
-                          foregroundColor: Colors.white,
-                          textStyle: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.w700),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                  // 入力＆選択
+                  Expanded(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      physics: const BouncingScrollPhysics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _label('あなたの名前', seed),
+                          _textBox(controller: _ownerCtrl, hint: 'あなたの名前'),
+                          const SizedBox(height: 8),
+                          _label('ペットの名前', seed),
+                          _textBox(controller: _petCtrl, hint: 'ペットの名前'),
+                          const SizedBox(height: 8),
+                          _label('種類', seed),
+                          _selectTileCompact(
+                            valueText: _species,
+                            onTap: () async {
+                              final v =
+                                  await Navigator.of(context).push<String>(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      PetTypeSelectPage(current: _species),
+                                ),
+                              );
+                              if (v != null) setState(() => _species = v);
+                            },
                           ),
-                        ),
-                        onPressed: () async {
-                          await _save();
-                          if (!mounted) return;
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => PreviewPage(
-                                ownerName: _ownerCtrl.text,
-                                petName: _petCtrl.text,
-                                species: _species,
-                                personality: _personality,
-                                dialect: _dialect,
-                              ),
-                            ),
-                          );
-                        },
-                        child: const Text('開始'),
+                          const SizedBox(height: 6),
+                          _label('性格', seed),
+                          _selectTileCompact(
+                            valueText: _personality,
+                            onTap: () async {
+                              final v =
+                                  await Navigator.of(context).push<String>(
+                                MaterialPageRoute(
+                                  builder: (_) => PersonalitySelectPage(
+                                    current: _personality,
+                                  ),
+                                ),
+                              );
+                              if (v != null) setState(() => _personality = v);
+                            },
+                          ),
+                          const SizedBox(height: 6),
+                          _label('方言', seed),
+                          _selectTileCompact(
+                            valueText: _dialect,
+                            onTap: () async {
+                              final v =
+                                  await Navigator.of(context).push<String>(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      DialectSelectPage(current: _dialect),
+                                ),
+                              );
+                              if (v != null) setState(() => _dialect = v);
+                            },
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 4),
-                  ],
-                ),
-              );
-            },
-          ),
+                  ),
+
+                  // 開始ボタン（画面下に固定）
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: seed,
+                        foregroundColor: Colors.white,
+                        textStyle: const TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.w700),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: _canStart
+                          ? () async {
+                              await _save();
+                              if (!context.mounted) return;
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => PreviewPage(
+                                    ownerName: _ownerCtrl.text.trim(),
+                                    petName: _petCtrl.text.trim(),
+                                    species: _species,
+                                    personality: _personality,
+                                    dialect: _dialect,
+                                  ),
+                                ),
+                              );
+                            }
+                          : null,
+                      child: Text(
+                        _canStart ? 'カメラでぺっとーくを始める' : '2つの名前を入力してください',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                ],
+              ),
+            );
+          },
         ),
-        // 画面最下部バナー
-        bottomNavigationBar: const SafeArea(
-          child: Padding(
-            padding: EdgeInsets.only(bottom: 6),
-            child: BannerAdView(),
-          ),
+      ),
+      // 画面最下部バナー
+      bottomNavigationBar: const SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(bottom: 6),
+          child: BannerAdView(),
         ),
       ),
     );
@@ -275,7 +311,8 @@ class _NameInputPageState extends State<NameInputPage> {
         ),
       );
 
-  Widget _textBox({required TextEditingController controller, required String hint}) {
+  Widget _textBox(
+      {required TextEditingController controller, required String hint}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -283,7 +320,7 @@ class _NameInputPageState extends State<NameInputPage> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 4,
             offset: const Offset(0, 1),
           )
@@ -292,9 +329,9 @@ class _NameInputPageState extends State<NameInputPage> {
       child: TextField(
         controller: controller,
         style: const TextStyle(fontSize: 18),
-        decoration:
-            const InputDecoration(hintText: '', border: InputBorder.none, isDense: true)
-                .copyWith(hintText: hint),
+        decoration: const InputDecoration(
+                hintText: '', border: InputBorder.none, isDense: true)
+            .copyWith(hintText: hint),
       ),
     );
   }
@@ -313,7 +350,7 @@ class _NameInputPageState extends State<NameInputPage> {
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.05),
+              color: Colors.black.withValues(alpha: 0.05),
               blurRadius: 4,
               offset: const Offset(0, 1),
             )

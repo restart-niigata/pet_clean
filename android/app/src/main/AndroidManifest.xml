@@ -8,9 +8,9 @@
 
     <application
         android:name="${applicationName}"
-        android:label="pet_clean"
+        android:label="ぺっとーく"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="false">
 
         <!-- ★AdMob 本番 App ID（Android）-->
         <meta-data
