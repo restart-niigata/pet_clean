@@ -23,6 +23,8 @@ class AdService {
   static const _lastInterstitialAtKey = 'ad.interstitial.lastShownAt';
   static const _interstitialEvery = 3;
   static const _interstitialCooldown = Duration(minutes: 5);
+  static const _forceTestAds =
+      bool.fromEnvironment('PET_TALK_TEST_ADS', defaultValue: false);
 
   static final ValueNotifier<bool> canRequestAds = ValueNotifier(false);
   static final ValueNotifier<bool> privacyOptionsRequired =
@@ -32,7 +34,9 @@ class AdService {
   static bool _mobileAdsInitialized = false;
   static bool _interstitialLoading = false;
   static bool _interstitialShowing = false;
+  static bool _previewEntryAdShownThisSession = false;
   static InterstitialAd? _interstitial;
+  static Future<void>? _interstitialLoadFuture;
 
   static bool get _isMobileAdsSupported =>
       !kIsWeb &&
@@ -42,14 +46,14 @@ class AdService {
   static bool get _isIOS => defaultTargetPlatform == TargetPlatform.iOS;
 
   static String get bannerUnitId {
-    if (!kReleaseMode) {
+    if (!kReleaseMode || _forceTestAds) {
       return _isIOS ? _testBannerIOS : _testBannerAndroid;
     }
     return _isIOS ? _prodBannerIOS : _prodBannerAndroid;
   }
 
   static String get _interstitialUnitId {
-    if (!kReleaseMode) {
+    if (!kReleaseMode || _forceTestAds) {
       return _isIOS ? _testInterstitialIOS : _testInterstitialAndroid;
     }
     return _isIOS ? _prodInterstitialIOS : _prodInterstitialAndroid;
@@ -137,52 +141,91 @@ class AdService {
     return null;
   }
 
-  static Future<void> _loadInterstitial() async {
+  static Future<void> _loadInterstitial() {
     if (!canRequestAds.value ||
         !_mobileAdsInitialized ||
-        _interstitialLoading ||
         _interstitialShowing ||
         _interstitial != null) {
-      return;
+      return Future.value();
+    }
+    if (_interstitialLoading) {
+      return _interstitialLoadFuture ?? Future.value();
     }
 
     _interstitialLoading = true;
+    final completed = Completer<void>();
+    _interstitialLoadFuture = completed.future;
     try {
-      await InterstitialAd.load(
+      InterstitialAd.load(
         adUnitId: _interstitialUnitId,
         request: const AdRequest(),
         adLoadCallback: InterstitialAdLoadCallback(
           onAdLoaded: (ad) {
             _interstitialLoading = false;
+            _interstitialLoadFuture = null;
             _interstitial = ad;
+            if (!completed.isCompleted) completed.complete();
           },
           onAdFailedToLoad: (error) {
             _interstitialLoading = false;
+            _interstitialLoadFuture = null;
             _interstitial = null;
             debugPrint('Interstitial load failed: ${error.message}');
+            if (!completed.isCompleted) completed.complete();
           },
         ),
       );
     } on Object catch (error) {
       _interstitialLoading = false;
+      _interstitialLoadFuture = null;
       _interstitial = null;
       debugPrint('Interstitial load error: $error');
+      if (!completed.isCompleted) completed.complete();
     }
+    return completed.future;
   }
 
-  /// 共有成功という自然な区切りでのみ、3回ごと・最短5分間隔で表示する。
-  /// 未ロード時は操作を待たせず、その回の広告をスキップする。
+  /// トップから撮影画面へ入る自然な区切りで、アプリ起動中に一度だけ表示する。
+  static Future<void> maybeShowOnPreviewEntry() async {
+    if (_previewEntryAdShownThisSession) return;
+    _previewEntryAdShownThisSession = true;
+    await initialize();
+    await _showLoadedInterstitial(waitForLoad: true);
+  }
+
+  /// 共有成功という自然な区切りで表示する。
+  /// 本番は3回ごと・最短5分間隔、テストAPKは動作確認のため毎回表示する。
   static Future<void> maybeShowAfterSuccessfulShare() async {
     if (!canRequestAds.value || _interstitialShowing) return;
 
     final preferences = await SharedPreferences.getInstance();
     final count = (preferences.getInt(_shareCountKey) ?? 0) + 1;
     await preferences.setInt(_shareCountKey, count);
-    if (count % _interstitialEvery != 0) return;
+    final every = _forceTestAds ? 1 : _interstitialEvery;
+    if (count % every != 0) return;
 
     final lastShownMillis = preferences.getInt(_lastInterstitialAtKey) ?? 0;
     final lastShown = DateTime.fromMillisecondsSinceEpoch(lastShownMillis);
-    if (DateTime.now().difference(lastShown) < _interstitialCooldown) return;
+    final cooldown = _forceTestAds ? Duration.zero : _interstitialCooldown;
+    if (DateTime.now().difference(lastShown) < cooldown) return;
+
+    await _showLoadedInterstitial(waitForLoad: _forceTestAds);
+  }
+
+  static Future<void> _showLoadedInterstitial({
+    required bool waitForLoad,
+  }) async {
+    if (!canRequestAds.value || _interstitialShowing) return;
+    if (_interstitial == null) {
+      final load = _loadInterstitial();
+      if (waitForLoad) {
+        try {
+          await load.timeout(const Duration(seconds: 6));
+        } on TimeoutException {
+          debugPrint('Interstitial load timed out');
+        }
+      }
+    }
 
     final ad = _interstitial;
     if (ad == null) {
@@ -190,6 +233,7 @@ class AdService {
       return;
     }
 
+    final preferences = await SharedPreferences.getInstance();
     _interstitial = null;
     _interstitialShowing = true;
     final dismissed = Completer<void>();

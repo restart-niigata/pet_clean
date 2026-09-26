@@ -262,6 +262,7 @@ class _NameInputPageState extends State<NameInputPage> {
                       onPressed: _canStart
                           ? () async {
                               await _save();
+                              await AdService.maybeShowOnPreviewEntry();
                               if (!context.mounted) return;
                               Navigator.of(context).push(
                                 MaterialPageRoute(
