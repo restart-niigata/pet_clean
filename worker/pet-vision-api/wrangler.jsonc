@@ -29,5 +29,24 @@
       "enabled": true,
       "head_sampling_rate": 0.1
     }
+  },
+  // 試験用。`wrangler deploy --env preview` で pet-talk-vision-api-preview として公開し、本番Workerには影響させない。
+  "env": {
+    "preview": {
+      "ai": {
+        "binding": "AI",
+        "remote": true
+      },
+      "ratelimits": [
+        {
+          "name": "VISION_RATE_LIMITER",
+          "namespace_id": "8252027",
+          "simple": {
+            "limit": 12,
+            "period": 60
+          }
+        }
+      ]
+    }
   }
 }

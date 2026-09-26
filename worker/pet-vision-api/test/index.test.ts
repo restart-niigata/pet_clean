@@ -2,23 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildVisionPrompt,
-  manualSmallMammalFallback,
+  decideFrame,
   parseCommentsResult,
+  parseFrameClassification,
   parseReplyResult,
-  parseVisionClassification,
+  poseToJapanese,
   statePriorityInstruction,
   speciesMatchesSelected,
+  summarizeVerdicts,
+  type FrameClassification,
 } from "../src/index";
-
-describe("buildVisionPrompt", () => {
-  it("asks the model to accept small or curled-up selected pets", () => {
-    const prompt = buildVisionPrompt("ハムスター");
-    expect(prompt).toContain("ハムスター");
-    expect(prompt).toContain("curled-up");
-    expect(prompt).toContain("Do not require the face or full body");
-    expect(prompt).toContain("different species MUST be PET");
-  });
-});
 
 describe("species matching", () => {
   it("matches Japanese and English aliases of the selected species", () => {
@@ -35,72 +28,6 @@ describe("species matching", () => {
     expect(speciesMatchesSelected("rabbit", "フェレット")).toBe(true);
     expect(speciesMatchesSelected("Chipmunk", "フクロモモンガ")).toBe(true);
     expect(speciesMatchesSelected("squirrel", "ウサギ")).toBe(true);
-  });
-});
-
-
-describe("parseVisionClassification", () => {
-  it("accepts a detected pet response", () => {
-    expect(
-      parseVisionClassification("PET|dog|0.91|lying on a blue cushion", "犬"),
-    ).toEqual({
-      petDetected: true,
-      species: "犬",
-      confidence: 0.91,
-      comment: "lying on a blue cushion",
-    });
-  });
-
-  it("normalizes a no-pet response", () => {
-    expect(parseVisionClassification("NONE|0.88|empty room", "犬")).toEqual({
-      petDetected: false,
-      species: "",
-      confidence: 0.88,
-      comment: "",
-    });
-  });
-
-  it("accepts a classification after model preamble and markdown", () => {
-    expect(
-      parseVisionClassification(
-        "Here is the classification:\n**PET｜cat｜0.84｜sitting by a window**",
-        "猫",
-      ),
-    ).toEqual({
-      petDetected: true,
-      species: "猫",
-      confidence: 0.84,
-      comment: "sitting by a window",
-    });
-  });
-
-  it("rejects malformed output", () => {
-    expect(() => parseVisionClassification("no result here", "犬")).toThrow(
-      "AI classification had an invalid format",
-    );
-  });
-});
-
-describe("manualSmallMammalFallback", () => {
-  it("lets an owner-confirmed small pet continue when vision says none", () => {
-    const classification = parseVisionClassification(
-      "NONE|1|frame too dark",
-      "フクロモモンガ",
-    );
-    expect(
-      manualSmallMammalFallback(classification, "フクロモモンガ"),
-    ).toMatchObject({
-      petDetected: true,
-      species: "フクロモモンガ",
-    });
-  });
-
-  it("does not bypass detection for dogs", () => {
-    const classification = parseVisionClassification(
-      "NONE|1|empty room",
-      "犬",
-    );
-    expect(manualSmallMammalFallback(classification, "犬")).toBeNull();
   });
 });
 
@@ -127,5 +54,126 @@ describe("conversation output parsing", () => {
     const lyingDown = statePriorityInstruction("クッションに伏せている");
     expect(lyingDown).toContain("くつろいだまま");
     expect(lyingDown).toContain("起き上がった後");
+  });
+});
+
+const frame = (overrides: Partial<FrameClassification>): FrameClassification => ({
+  category: "none",
+  species: "",
+  confidence: 0.9,
+  pose: "",
+  ...overrides,
+});
+
+describe("buildVisionPrompt", () => {
+  it("asks the model to accept partial, blurry, sleeping and dark pets", () => {
+    const prompt = buildVisionPrompt("犬");
+    expect(prompt).toContain("dog");
+    expect(prompt).toContain("only partly visible");
+    expect(prompt).toContain("blurry");
+    expect(prompt).toContain("sleeping");
+    expect(prompt).toContain("dim or dark lighting");
+    expect(prompt).toContain('If you cannot tell, use "unknown"');
+  });
+});
+
+describe("parseFrameClassification", () => {
+  it("parses schema output from an object or a JSON string", () => {
+    const expected = { category: "cat", species: "cat", confidence: 0.8, pose: "curled up" };
+    expect(parseFrameClassification(expected)).toEqual(expected);
+    expect(parseFrameClassification(`Result: ${JSON.stringify(expected)}`)).toEqual(expected);
+  });
+
+  it("clamps confidence and rejects unknown categories", () => {
+    expect(parseFrameClassification({ category: "DOG", confidence: 3 })).toMatchObject({
+      category: "dog",
+      confidence: 1,
+    });
+    expect(() => parseFrameClassification({ category: "bird" })).toThrow("invalid category");
+  });
+});
+
+describe("decideFrame", () => {
+  it("accepts the selected species", () => {
+    expect(decideFrame(frame({ category: "dog", species: "dalmatian" }), "犬")).toMatchObject({
+      kind: "pet",
+      species: "犬",
+    });
+  });
+
+  it("passes unknown frames instead of rejecting them", () => {
+    expect(decideFrame(frame({ category: "unknown", confidence: 0.3 }), "猫")).toMatchObject({
+      kind: "unknown_pass",
+      species: "猫",
+    });
+  });
+
+  it("reports a confident different species", () => {
+    expect(decideFrame(frame({ category: "dog", confidence: 0.9 }), "猫")).toEqual({
+      kind: "mismatch",
+      detectedSpecies: "犬",
+      confidence: 0.9,
+    });
+  });
+
+  it("passes a low-confidence different species as unknown", () => {
+    expect(decideFrame(frame({ category: "dog", confidence: 0.4 }), "猫").kind).toBe(
+      "unknown_pass",
+    );
+  });
+
+  it("rejects none for dogs but lets small mammals continue", () => {
+    expect(decideFrame(frame({ category: "none" }), "犬").kind).toBe("none");
+    expect(decideFrame(frame({ category: "none" }), "フクロモモンガ")).toMatchObject({
+      kind: "unknown_pass",
+      species: "フクロモモンガ",
+    });
+  });
+
+  it("treats confusable small mammals as the selected pet", () => {
+    expect(
+      decideFrame(frame({ category: "other_pet", species: "hamster" }), "フクロモモンガ"),
+    ).toMatchObject({ kind: "pet", species: "フクロモモンガ" });
+  });
+});
+
+describe("summarizeVerdicts", () => {
+  it("accepts when any frame found the pet", () => {
+    expect(
+      summarizeVerdicts([
+        { kind: "none", confidence: 0.9 },
+        { kind: "pet", species: "犬", confidence: 0.8, pose: "lying down with eyes closed" },
+      ]),
+    ).toMatchObject({
+      petDetected: true,
+      species: "犬",
+      observedState: "横になっている、目を閉じて眠っている",
+      verdict: "pet",
+      framesChecked: 2,
+    });
+  });
+
+  it("reports a mismatch only when no frame passed", () => {
+    expect(
+      summarizeVerdicts([
+        { kind: "none", confidence: 0.9 },
+        { kind: "mismatch", detectedSpecies: "犬", confidence: 0.9 },
+      ]),
+    ).toMatchObject({ petDetected: false, detectedSpecies: "犬", verdict: "mismatch" });
+  });
+
+  it("returns no pet when every frame is empty", () => {
+    expect(summarizeVerdicts([{ kind: "none", confidence: 0.7 }])).toMatchObject({
+      petDetected: false,
+      verdict: "none",
+    });
+  });
+});
+
+describe("poseToJapanese", () => {
+  it("maps resting poses to phrases the reply constraints understand", () => {
+    expect(poseToJapanese("curled up asleep")).toBe("丸まっている、目を閉じて眠っている");
+    expect(statePriorityInstruction(poseToJapanese("lying on back"))).toContain("体を横たえる");
+    expect(poseToJapanese("")).toBe("画面に映っている");
   });
 });

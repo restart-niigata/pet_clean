@@ -1,11 +1,13 @@
 const VISION_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
-const COMMENT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
 const CONVERSATION_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const MAX_BODY_BYTES = 4_500_000;
 const MAX_BASE64_LENGTH = 4_000_000;
+const MAX_FRAMES = 3;
+// 別種と断定するのはこの信頼度以上のときだけ。未満は「不明」として通す。
+const MISMATCH_MIN_CONFIDENCE = 0.6;
 
 type AnalyzeRequest = {
-  imageBase64: string;
+  imagesBase64: string[];
   species: string;
   personality: string;
   dialect: string;
@@ -20,7 +22,23 @@ export type VisionResult = {
   comments?: string[];
   observedState?: string;
   detectedSpecies?: string;
+  verdict?: FrameVerdict["kind"];
+  framesChecked?: number;
 };
+
+export type FrameCategory = "dog" | "cat" | "other_pet" | "none" | "unknown";
+
+export type FrameClassification = {
+  category: FrameCategory;
+  species: string;
+  confidence: number;
+  pose: string;
+};
+
+export type FrameVerdict =
+  | { kind: "pet" | "unknown_pass"; species: string; confidence: number; pose: string }
+  | { kind: "mismatch"; detectedSpecies: string; confidence: number }
+  | { kind: "none"; confidence: number };
 
 const corsHeaders = {
   "access-control-allow-origin": "*",
@@ -74,137 +92,7 @@ export default {
     }
 
     try {
-      const inference = await env.AI.run(VISION_MODEL, {
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a careful visual pet detector. Inspect the actual image, not assumptions. " +
-              "Follow the requested one-line output format exactly.",
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: buildVisionPrompt(payload.species) },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${payload.imageBase64}`,
-                },
-              },
-            ],
-          },
-        ],
-        stream: false,
-        max_tokens: 120,
-        temperature: 0,
-      });
-      const observation = requiredAiString(inference, "response");
-      const classification = parseVisionClassification(
-        observation,
-        payload.species,
-      );
-      const smallMammalFallback = manualSmallMammalFallback(
-        classification,
-        payload.species,
-      );
-      if (smallMammalFallback) {
-        console.log(
-          JSON.stringify({
-            event: "pet_vision_complete",
-            petDetected: true,
-            species: smallMammalFallback.species,
-            detectedSpecies: "",
-            confidence: classification.confidence,
-            manualSmallMammalFallback: true,
-          }),
-        );
-        return jsonResponse(smallMammalFallback);
-      }
-      if (!classification.petDetected) {
-        console.log(
-          JSON.stringify({
-            event: "pet_vision_complete",
-            petDetected: false,
-            species: "",
-            detectedSpecies: "",
-            confidence: classification.confidence,
-          }),
-        );
-        return jsonResponse(classification);
-      }
-      if (!speciesMatchesSelected(classification.species, payload.species)) {
-        const mismatch: VisionResult = {
-          petDetected: false,
-          species: "",
-          confidence: classification.confidence,
-          comment: "",
-          comments: [],
-          observedState: "",
-          detectedSpecies: classification.species,
-        };
-        console.log(
-          JSON.stringify({
-            event: "pet_vision_complete",
-            petDetected: false,
-            species: "",
-            detectedSpecies: classification.species,
-            confidence: classification.confidence,
-          }),
-        );
-        return jsonResponse(mismatch);
-      }
-      if (isConfusableSmallMammal(payload.species)) {
-        const acceptedSpecies = preferredSpeciesForAcceptedMatch(
-          classification.species,
-          payload.species,
-        );
-        const result: VisionResult = {
-          petDetected: true,
-          species: acceptedSpecies,
-          confidence: classification.confidence,
-          comment: "ここにいるよ",
-          comments: ["ここにいるよ"],
-          observedState: classification.comment || "小動物が画面に映っている",
-        };
-        console.log(
-          JSON.stringify({
-            event: "pet_vision_complete",
-            petDetected: true,
-            species: acceptedSpecies,
-            detectedSpecies: classification.species,
-            confidence: classification.confidence,
-            lenientSmallMammal: true,
-          }),
-        );
-        return jsonResponse(result);
-      }
-      const structuredInference = await env.AI.run(COMMENT_MODEL, {
-        messages: [
-          {
-            role: "system",
-            content:
-              "Convert an image model observation into the required JSON. " +
-              "Be conservative: uncertain, non-living, photographed, drawn, " +
-              "screen-displayed, statue, or plush animals are not pets.",
-          },
-          {
-            role: "user",
-            content: buildStructuredVisionPrompt(payload, observation),
-          },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: visionResultSchema,
-        },
-        stream: false,
-        max_tokens: 180,
-        temperature: 0,
-      });
-      const result = parseStructuredVisionResult(
-        requiredAiValue(structuredInference, "response"),
-        payload.species,
-      );
+      const result = await analyzeFrames(env, payload);
       console.log(
         JSON.stringify({
           event: "pet_vision_complete",
@@ -212,6 +100,9 @@ export default {
           species: result.species,
           detectedSpecies: result.detectedSpecies ?? "",
           confidence: result.confidence,
+          verdict: result.verdict,
+          framesSent: payload.imagesBase64.length,
+          framesChecked: result.framesChecked,
         }),
       );
       return jsonResponse(result);
@@ -420,9 +311,28 @@ function validateConversationHistory(value: unknown): Array<{ role: string; cont
 function validateAnalyzeRequest(value: unknown): AnalyzeRequest {
   if (!isRecord(value)) throw new Error("Request body must be an object");
 
-  const imageBase64 = requiredString(value, "imageBase64", MAX_BASE64_LENGTH);
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(imageBase64)) {
-    throw new Error("imageBase64 must be valid base64 JPEG data");
+  // 旧アプリは imageBase64 の1枚、新アプリは imagesBase64 で最大3枚を送る。
+  let imagesBase64: string[];
+  if (value.imagesBase64 !== undefined) {
+    if (
+      !Array.isArray(value.imagesBase64) ||
+      value.imagesBase64.length === 0 ||
+      value.imagesBase64.length > MAX_FRAMES
+    ) {
+      throw new Error(`imagesBase64 must contain 1 to ${MAX_FRAMES} images`);
+    }
+    imagesBase64 = value.imagesBase64.map((_, index) =>
+      requiredString(
+        value.imagesBase64 as Record<string, unknown>,
+        String(index),
+        MAX_BASE64_LENGTH,
+      ),
+    );
+  } else {
+    imagesBase64 = [requiredString(value, "imageBase64", MAX_BASE64_LENGTH)];
+  }
+  if (imagesBase64.some((image) => !/^[A-Za-z0-9+/]+={0,2}$/.test(image))) {
+    throw new Error("images must be valid base64 JPEG data");
   }
 
   const clientId = requiredString(value, "clientId", 64);
@@ -431,7 +341,7 @@ function validateAnalyzeRequest(value: unknown): AnalyzeRequest {
   }
 
   return {
-    imageBase64,
+    imagesBase64,
     clientId,
     species: requiredString(value, "species", 40),
     personality: requiredString(value, "personality", 40),
@@ -470,28 +380,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function buildVisionPrompt(expectedSpecies: string): string {
   const englishSpecies = visionSpeciesName(expectedSpecies);
-  const smallMammalGuidance = isConfusableSmallMammal(expectedSpecies)
-    ? "The expected pet is a visually confusable small mammal. If a real small mammal is visible and there are no strong anatomical contradictions, output PET and use the selected type even when the exact species is uncertain."
-    : "";
   return [
-    "Classify this camera image.",
-    `The owner selected ${englishSpecies} (${sanitizeText(expectedSpecies, 40)}) as the expected pet type.`,
-    "The selected type is context, not the answer. Identify the animal actually visible.",
-    "If a different animal is visible, output PET with its actual species; never relabel it as the selected type.",
-    "A clearly visible real animal of a different species MUST be PET, never NONE.",
-    smallMammalGuidance,
-    "Search the entire frame carefully, including for a small, curled-up, partly hidden, or distant pet.",
-    "Answer exactly one ASCII line in one of these formats:",
-    "NONE|confidence|brief reason",
-    "PET|animal species|confidence|visible pose or action",
-    "confidence must be a number from 0 to 1.",
-    "Use PET when visible fur, body outline, ears, paws, or other anatomical features are consistent with a real living pet.",
-    "Do not require the face or full body to be visible, especially for rabbits and hamsters curled into a ball.",
-    "Use NONE only when there is no plausible real animal anywhere in the frame.",
-    "Do not count photos, screens, drawings, statues, plush toys, or people as animals.",
-    "Use simple English and do not add any other text.",
+    `A pet owner is pointing a phone camera at their pet. They say it is a ${englishSpecies}.`,
+    "Report what is actually visible in this frame; the owner's answer is context, not the answer.",
+    "Search the whole frame. Count a real animal as present even if it is only partly visible (only the back, tail, paws, ears or fur), cut off by the frame edge, blurry, far away, small, seen from the side or behind, sleeping, curled up, lying down, or in dim or dark lighting.",
+    'Use "none" only when you are confident there is no real animal anywhere. If you cannot tell, use "unknown".',
+    'Plush toys, figurines, drawings, and animals shown on a screen or printed photo are "none".',
+    "category: dog, cat, other_pet, none, or unknown. species: the visible animal in simple English, or empty.",
+    "confidence: 0 to 1, how sure you are about category.",
+    'pose: when an animal is visible, always describe its visible posture or action in a few English words, for example "lying down with eyes closed" or "sitting and looking at the camera". Empty only for none.',
   ].join(" ");
 }
+
+const frameSchema = {
+  type: "object",
+  properties: {
+    category: {
+      type: "string",
+      enum: ["dog", "cat", "other_pet", "none", "unknown"],
+    },
+    species: { type: "string" },
+    confidence: { type: "number" },
+    pose: { type: "string" },
+  },
+  required: ["category", "species", "confidence", "pose"],
+};
 
 function visionSpeciesName(species: string): string {
   const names: Record<string, string> = {
@@ -505,191 +418,172 @@ function visionSpeciesName(species: string): string {
   return names[species] ?? sanitizeText(species, 40);
 }
 
-const visionResultSchema = {
-  type: "object",
-  properties: {
-    petDetected: { type: "boolean" },
-    species: { type: "string" },
-    confidence: { type: "number", minimum: 0, maximum: 1 },
-    comment: { type: "string" },
-    observedState: { type: "string" },
-    comments: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 3,
-    },
-  },
-  required: [
-    "petDetected",
-    "species",
-    "confidence",
-    "comment",
-    "observedState",
-    "comments",
-  ],
-  additionalProperties: false,
-};
-
-function buildStructuredVisionPrompt(
-  payload: AnalyzeRequest,
-  observation: string,
-): string {
-  return [
-    "Image model observation follows between <observation> tags.",
-    `<observation>${sanitizeText(observation, 500)}</observation>`,
-    `Expected pet type selected by the user: ${payload.species}.`,
-    `Personality: ${payload.personality}.`,
-    `Dialect: ${payload.dialect}.`,
-    "Set petDetected true when the observation reports PET and describes plausible anatomical features of a real living animal.",
-    "A small, curled-up, distant, or partly hidden expected pet does not need a visible face or full body.",
-    "Use the actual observed species. Never rename a different animal to the expected pet type.",
-    "If false, use empty strings for species, observedState, and comment and an empty comments array.",
-    "If true, use a Japanese species name and write exactly three different, natural,",
-    "Describe only the visibly observed posture or action in observedState in concise Japanese,",
-    "for example 横になって目を閉じている. Do not infer an emotion or medical condition.",
-    "first-person Japanese comments of at most 60 characters each in comments.",
-    "Base them only on the visible pose or action. Set comment to the first comments item.",
-  ].join(" ");
+async function classifyFrame(
+  env: Env,
+  imageBase64: string,
+  selectedSpecies: string,
+): Promise<FrameClassification> {
+  const inference = await env.AI.run(VISION_MODEL, {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: buildVisionPrompt(selectedSpecies) },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
+          },
+        ],
+      },
+    ],
+    response_format: { type: "json_schema", json_schema: frameSchema },
+    stream: false,
+    max_tokens: 80,
+    temperature: 0,
+  });
+  return parseFrameClassification(requiredAiValue(inference, "response"));
 }
 
-export function parseStructuredVisionResult(
-  response: unknown,
+export function parseFrameClassification(response: unknown): FrameClassification {
+  const parsed = parseStructuredObject(response);
+  const category = String(parsed.category ?? "").trim().toLowerCase();
+  if (!["dog", "cat", "other_pet", "none", "unknown"].includes(category)) {
+    throw new Error("AI returned an invalid category");
+  }
+  const rawConfidence = Number(parsed.confidence);
+  return {
+    category: category as FrameCategory,
+    species: sanitizeText(parsed.species, 40),
+    confidence: Number.isFinite(rawConfidence)
+      ? Math.min(1, Math.max(0, rawConfidence))
+      : 0.5,
+    pose: sanitizeText(parsed.pose, 80),
+  };
+}
+
+// 見逃しを減らすため「不明」は通す側に倒し、別種は十分な信頼度があるときだけ断定する。
+export function decideFrame(
+  frame: FrameClassification,
   selectedSpecies: string,
-): VisionResult {
-  let parsed = response;
-  if (typeof response === "string") {
-    const start = response.indexOf("{");
-    const end = response.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      throw new Error("AI returned invalid structured classification");
-    }
+): FrameVerdict {
+  const smallMammal = isConfusableSmallMammal(selectedSpecies);
+  if (frame.category === "none") {
+    return smallMammal
+      ? { kind: "unknown_pass", species: canonicalSpecies(selectedSpecies), confidence: 0.5, pose: "" }
+      : { kind: "none", confidence: frame.confidence };
+  }
+  const fallbackSpecies =
+    canonicalSpecies(selectedSpecies) || sanitizeText(selectedSpecies, 30);
+  if (frame.category === "unknown") {
+    return { kind: "unknown_pass", species: fallbackSpecies, confidence: 0.5, pose: frame.pose };
+  }
+  const detected =
+    frame.category === "dog"
+      ? "犬"
+      : frame.category === "cat"
+        ? "猫"
+        : canonicalSpecies(frame.species);
+  if (detected.length > 0 && speciesMatchesSelected(detected, selectedSpecies)) {
+    return {
+      kind: "pet",
+      species: preferredSpeciesForAcceptedMatch(detected, selectedSpecies),
+      confidence: frame.confidence,
+      pose: frame.pose,
+    };
+  }
+  if (detected.length > 0 && frame.confidence >= MISMATCH_MIN_CONFIDENCE) {
+    return { kind: "mismatch", detectedSpecies: detected, confidence: frame.confidence };
+  }
+  return { kind: "unknown_pass", species: fallbackSpecies, confidence: 0.5, pose: frame.pose };
+}
+
+async function analyzeFrames(env: Env, payload: AnalyzeRequest): Promise<VisionResult> {
+  const verdicts: FrameVerdict[] = [];
+  let lastError: unknown = null;
+  for (const image of payload.imagesBase64) {
+    let verdict: FrameVerdict;
     try {
-      parsed = JSON.parse(response.slice(start, end + 1));
-    } catch {
-      throw new Error("AI returned invalid structured classification");
+      verdict = decideFrame(
+        await classifyFrame(env, image, payload.species),
+        payload.species,
+      );
+    } catch (error) {
+      lastError = error;
+      continue;
     }
+    verdicts.push(verdict);
+    // 1枚でもペットと判定できれば残りのフレームは推論しない。
+    if (verdict.kind === "pet") break;
   }
-  if (!isRecord(parsed) || typeof parsed.petDetected !== "boolean") {
-    throw new Error("AI omitted petDetected");
+  if (verdicts.length === 0) throw lastError ?? new Error("No frames analyzed");
+  return summarizeVerdicts(verdicts);
+}
+
+export function summarizeVerdicts(verdicts: FrameVerdict[]): VisionResult {
+  const framesChecked = verdicts.length;
+  const accepted =
+    verdicts.find((v) => v.kind === "pet") ??
+    verdicts.find((v) => v.kind === "unknown_pass");
+  if (accepted && (accepted.kind === "pet" || accepted.kind === "unknown_pass")) {
+    return {
+      petDetected: true,
+      species: accepted.species,
+      confidence: accepted.confidence,
+      comment: "ここにいるよ",
+      comments: ["ここにいるよ"],
+      observedState: poseToJapanese(accepted.pose),
+      verdict: accepted.kind,
+      framesChecked,
+    };
   }
-  const confidence =
-    typeof parsed.confidence === "number"
-      ? Math.min(1, Math.max(0, parsed.confidence))
-      : 0;
-  if (!parsed.petDetected) {
+  const mismatch = verdicts.find((v) => v.kind === "mismatch");
+  if (mismatch && mismatch.kind === "mismatch") {
     return {
       petDetected: false,
       species: "",
-      confidence,
+      confidence: mismatch.confidence,
       comment: "",
       comments: [],
       observedState: "",
+      detectedSpecies: mismatch.detectedSpecies,
+      verdict: "mismatch",
+      framesChecked,
     };
   }
-
-  const detectedSpecies = normalizeSpecies(
-    typeof parsed.species === "string" ? parsed.species : "",
-    selectedSpecies,
-  );
-  const observedState = sanitizeText(parsed.observedState, 100);
-  const rawComments = Array.isArray(parsed.comments) ? parsed.comments : [];
-  const comments = rawComments
-    .map((value) =>
-      sanitizeText(value, 60).replace(/^[「『"']|[」』"']$/g, ""),
-    )
-    .filter((value, index, all) => value.length > 0 && all.indexOf(value) === index)
-    .slice(0, 3);
-  const fallbackComment = sanitizeText(parsed.comment, 60).replace(
-    /^[「『"']|[」』"']$/g,
-    "",
-  );
-  if (comments.length === 0 && fallbackComment.length > 0) {
-    comments.push(fallbackComment);
-  }
-  if (
-    detectedSpecies.length === 0 ||
-    comments.length === 0 ||
-    observedState.length === 0
-  ) {
-    throw new Error("AI omitted detected pet details");
-  }
-  if (!speciesMatchesSelected(detectedSpecies, selectedSpecies)) {
-    return {
-      petDetected: false,
-      species: "",
-      confidence,
-      comment: "",
-      comments: [],
-      observedState: "",
-      detectedSpecies,
-    };
-  }
-  const species = preferredSpeciesForAcceptedMatch(
-    detectedSpecies,
-    selectedSpecies,
-  );
   return {
-    petDetected: true,
-    species,
-    confidence,
-    comment: comments[0] ?? fallbackComment,
-    comments,
-    observedState,
+    petDetected: false,
+    species: "",
+    confidence: Math.max(...verdicts.map((v) => v.confidence)),
+    comment: "",
+    comments: [],
+    observedState: "",
+    verdict: "none",
+    framesChecked,
   };
 }
 
-export function parseVisionClassification(
-  answer: unknown,
-  selectedSpecies: string,
-): VisionResult {
-  if (typeof answer !== "string" || answer.trim().length === 0) {
-    throw new Error("AI returned an empty classification");
-  }
-
-  const normalized = answer
-    .replace(/[｜]/g, "|")
-    .replace(/[`*_#]/g, " ")
-    .trim();
-  const classificationStart = normalized.search(/\b(?:NONE|PET)\s*\|/i);
-  if (classificationStart < 0) {
-    throw new Error("AI classification had an invalid format");
-  }
-  const line =
-    normalized.slice(classificationStart).split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const parts = line.split("|").map((part) => part.trim());
-  const kind = parts[0]?.toUpperCase();
-  if (kind === "NONE" && parts.length >= 2) {
-    return {
-      petDetected: false,
-      species: "",
-      confidence: parseConfidence(parts[1]),
-      comment: "",
-    };
-  }
-  if (kind !== "PET" || parts.length < 4) {
-    throw new Error("AI classification had an invalid format");
-  }
-
-  const species = normalizeSpecies(parts[1] ?? "", selectedSpecies);
-  const visibleSituation = sanitizeText(parts.slice(3).join(" "), 120);
-  if (species.length === 0 || visibleSituation.length === 0) {
-    throw new Error("Detected classification omitted species or situation");
-  }
-  return {
-    petDetected: true,
-    species,
-    confidence: parseConfidence(parts[2]),
-    comment: visibleSituation,
-  };
-}
-
-function requiredAiString(value: unknown, key: "answer" | "response"): string {
-  const output = requiredAiValue(value, key);
-  if (typeof output !== "string") {
-    throw new Error(`AI returned no ${key}`);
-  }
-  return output;
+// 会話・コメント書き換えの姿勢制約は日本語の語句で判定するため、英語の姿勢説明を日本語へ寄せる。
+export function poseToJapanese(pose: string): string {
+  const text = pose.toLowerCase();
+  const phrases: Array<[RegExp, string]> = [
+    [/on (?:its|his|her) back|belly up/, "仰向けに寝転んでいる"],
+    [/curled/, "丸まっている"],
+    [/lying|laying|lie down|resting/, "横になっている"],
+    [/eyes? closed|sleep|asleep|napping|dozing/, "目を閉じて眠っている"],
+    [/sitting|seated/, "座っている"],
+    [/standing/, "立っている"],
+    [/walking/, "歩いている"],
+    [/running/, "走っている"],
+    [/eating|drinking/, "食べている"],
+    [/playing/, "遊んでいる"],
+    [/looking at (?:the )?camera|staring/, "こちらを見ている"],
+    [/grooming|licking/, "毛づくろいしている"],
+  ];
+  const matched = phrases
+    .filter(([pattern]) => pattern.test(text))
+    .map(([, japanese]) => japanese)
+    .slice(0, 2);
+  return matched.length > 0 ? matched.join("、") : "画面に映っている";
 }
 
 function requiredAiValue(value: unknown, key: "answer" | "response"): unknown {
@@ -698,20 +592,6 @@ function requiredAiValue(value: unknown, key: "answer" | "response"): unknown {
     throw new Error(`AI returned no ${key}`);
   }
   return outer[key];
-}
-
-function parseConfidence(value: string | undefined): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.min(1, Math.max(0, parsed));
-}
-
-function normalizeSpecies(raw: string, selectedSpecies: string): string {
-  const canonical = canonicalSpecies(raw);
-  if (canonical.length > 0) return canonical;
-  const sanitized = sanitizeText(raw, 30);
-  if (sanitized.length > 0) return sanitized;
-  return sanitizeText(selectedSpecies, 30);
 }
 
 function canonicalSpecies(raw: string): string {
@@ -794,26 +674,6 @@ function preferredSpeciesForAcceptedMatch(
     return canonicalSpecies(selectedSpecies);
   }
   return detectedSpecies;
-}
-
-export function manualSmallMammalFallback(
-  classification: VisionResult,
-  selectedSpecies: string,
-): VisionResult | null {
-  if (
-    classification.petDetected ||
-    !isConfusableSmallMammal(selectedSpecies)
-  ) {
-    return null;
-  }
-  return {
-    petDetected: true,
-    species: canonicalSpecies(selectedSpecies),
-    confidence: classification.confidence,
-    comment: "ここにいるよ",
-    comments: ["ここにいるよ"],
-    observedState: "小動物が画面に映っている可能性がある",
-  };
 }
 
 export function parseReplyResult(response: unknown): string {

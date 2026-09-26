@@ -78,7 +78,7 @@ void main() {
         final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
 
         expect(request.method, 'POST');
-        expect(body['imageBase64'], base64Encode([1, 2, 3]));
+        expect(body['imagesBase64'], [base64Encode([1, 2, 3])]);
         expect(body['species'], '犬');
         expect(body['personality'], '元気');
         expect(body['dialect'], '標準語');
@@ -100,7 +100,7 @@ void main() {
         endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
       );
       final result = await service.analyzeImage(
-        imageBytes: Uint8List.fromList([1, 2, 3]),
+        frames: [Uint8List.fromList([1, 2, 3])],
         species: '犬',
         personality: '元気',
         dialect: '標準語',
@@ -142,7 +142,7 @@ void main() {
         endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
       );
       final result = await service.analyzeImage(
-        imageBytes: Uint8List.fromList([1, 2, 3]),
+        frames: [Uint8List.fromList([1, 2, 3])],
         species: 'フクロモモンガ',
         personality: '元気',
         dialect: '標準語',
@@ -169,7 +169,7 @@ void main() {
       );
 
       final result = await service.analyzeImage(
-        imageBytes: Uint8List.fromList([1, 2, 3]),
+        frames: [Uint8List.fromList([1, 2, 3])],
         species: 'フクロモモンガ',
         personality: '元気',
         dialect: '標準語',

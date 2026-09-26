@@ -85,7 +85,10 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   DateTime? _lastMotionCommentAt;
   String _observedPetState = '';
   final List<Map<String, String>> _conversationHistory = [];
-  static const double _minimumPetConfidence = 0.40;
+  // 判定の厳しさはWorker側で調整する（不明は通す）。アプリでは信頼度で再度ふるい落とさない。
+  static const double _minimumPetConfidence = 0.0;
+  static const int _visionFrameCount = 3;
+  static const Duration _visionFrameInterval = Duration(milliseconds: 500);
   static const double _minimumSmallPetConfidence = 0.0;
   static const Set<String> _lenientSmallPets = {
     'フクロモモンガ',
@@ -294,7 +297,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     _petMotionService.reset();
     _observedPetState = '';
     _conversationHistory.clear();
-    XFile? frame;
+    final frames = <XFile>[];
     if (mounted) {
       setState(() {
         _showComment = false;
@@ -302,11 +305,18 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       });
     }
     try {
-      frame = await controller.takePicture();
-      final bytes = await frame.readAsBytes();
+      // 姿勢や手ブレで1枚だけ外れることがあるため、0.5秒間隔で3枚送る。
+      final frameBytes = <Uint8List>[];
+      for (var i = 0; i < _visionFrameCount; i++) {
+        if (i > 0) await Future<void>.delayed(_visionFrameInterval);
+        if (!mounted) return;
+        final frame = await controller.takePicture();
+        frames.add(frame);
+        frameBytes.add(await frame.readAsBytes());
+      }
       final dialect = await _effectiveDialect();
       final result = await _aiService.analyzeImage(
-        imageBytes: bytes,
+        frames: frameBytes,
         species: widget.species,
         personality: widget.personality,
         dialect: dialect,
@@ -394,7 +404,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       }
     } finally {
       _visionBusy = false;
-      if (frame != null) {
+      for (final frame in frames) {
         try {
           await cleanupCameraFrame(frame.path);
         } on Object catch (error) {
@@ -602,6 +612,11 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       if (mounted) {
         setState(() => _visionStatus = '音声を認識しています…');
       }
+      return;
+    }
+    // 音声認識はiOSネイティブ実装のみ。Webでは端末設定への誘導が誤案内になる。
+    if (kIsWeb) {
+      setState(() => _visionStatus = '音声会話はアプリ版で利用できます');
       return;
     }
     if (_comments.isEmpty) {

@@ -133,8 +133,9 @@ class PetTalkAiService {
     }
   }
 
+  /// [frames] は連続撮影した1〜3枚。Worker側で1枚でもペットと判定できれば検出扱い。
   Future<PetVisionResult?> analyzeImage({
-    required Uint8List imageBytes,
+    required List<Uint8List> frames,
     required String species,
     required String personality,
     required String dialect,
@@ -148,7 +149,7 @@ class PetTalkAiService {
       lastVisionFailure = PetVisionFailure.retryTooSoon;
       return null;
     }
-    if (imageBytes.isEmpty) {
+    if (frames.isEmpty || frames.any((frame) => frame.isEmpty)) {
       lastVisionFailure = PetVisionFailure.invalidResponse;
       return null;
     }
@@ -171,8 +172,8 @@ class PetTalkAiService {
               'accept': 'application/json',
               'x-client-id': clientId,
             },
-            body: jsonEncode(<String, String>{
-              'imageBase64': base64Encode(imageBytes),
+            body: jsonEncode(<String, Object>{
+              'imagesBase64': frames.map(base64Encode).toList(growable: false),
               'species': species,
               'personality': personality,
               'dialect': dialect,
