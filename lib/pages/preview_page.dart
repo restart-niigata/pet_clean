@@ -11,8 +11,11 @@ import 'package:screenshot/screenshot.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/pet_voice_profile.dart';
+import 'pet_voice_settings_page.dart';
 import '../services/ad_service.dart';
 import '../services/camera_frame_cleanup.dart';
+import '../services/image_resize_service.dart';
 import '../services/local_comment_service.dart';
 import '../services/pet_motion_service.dart';
 import '../services/pet_talk_ai_service.dart';
@@ -82,8 +85,17 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   _AmbientPace _ambientPace = _AmbientPace.balanced;
   int _chattyBurstRemaining = 0;
   bool _motionCommentPending = false;
-  DateTime? _lastMotionCommentAt;
   String _observedPetState = '';
+  String _poseKey = '';
+  String _moodKey = '';
+  String _petMood = '';
+  String _petExpression = '';
+  String _previousPose = '';
+  String _previousMood = '';
+  PetVoiceProfile? _voiceProfile;
+  Timer? _observationTimer;
+  bool _observationBusy = false;
+  DateTime? _lastObservationAt;
   final List<Map<String, String>> _conversationHistory = [];
   // 判定の厳しさはWorker側で調整する（不明は通す）。アプリでは信頼度で再度ふるい落とさない。
   static const double _minimumPetConfidence = 0.0;
@@ -105,6 +117,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadVoiceProfile());
     _initCamera();
   }
 
@@ -112,6 +125,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _commentTimer?.cancel();
+    _observationTimer?.cancel();
     unawaited(_speechService.stop());
     _controller?.dispose();
     super.dispose();
@@ -121,6 +135,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state != AppLifecycleState.resumed) {
       _commentTimer?.cancel();
+      _observationTimer?.cancel();
       await _stopPresenceMonitoring();
       return;
     }
@@ -129,8 +144,17 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         await _initCamera();
       } else if (mounted) {
         setState(() {});
+        if (_comments.isNotEmpty) _scheduleObservation();
       }
     }
+  }
+
+  Future<void> _loadVoiceProfile() async {
+    final profile = await PetVoiceProfile.load(
+      defaultPreset: widget.personality,
+      ownerName: widget.ownerName,
+    );
+    if (mounted) setState(() => _voiceProfile = profile);
   }
 
   Future<void> _initCamera() async {
@@ -291,11 +315,17 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
 
     _visionBusy = true;
     _commentTimer?.cancel();
+    _observationTimer?.cancel();
     _conversationMode = false;
     _motionCommentPending = false;
-    _lastMotionCommentAt = null;
     _petMotionService.reset();
     _observedPetState = '';
+    _poseKey = '';
+    _moodKey = '';
+    _petMood = '';
+    _petExpression = '';
+    _previousPose = '';
+    _previousMood = '';
     _conversationHistory.clear();
     final frames = <XFile>[];
     if (mounted) {
@@ -343,6 +373,10 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
                   ? _minimumSmallPetConfidence
                   : _minimumPetConfidence)) {
         _observedPetState = result.observedState;
+        _poseKey = result.poseKey;
+        _moodKey = result.moodKey;
+        _petMood = result.mood;
+        _petExpression = result.expression;
         final comments = await _localCommentService.load(
           species: widget.species,
           personality: widget.personality,
@@ -356,25 +390,12 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
             _visionStatus = '選択した性格のコメントが見つかりません';
           });
         } else {
-          var spokenComments = comments.take(8).toList(growable: false);
-          setState(
-            () => _visionStatus = dialect == '標準語'
-                ? '今の様子にコメントを合わせています…'
-                : '今の様子に合う自然な$dialectに整えています…',
-          );
-          final rewritten = await _aiService.rewriteComments(
-            comments: spokenComments,
-            species: widget.species,
-            personality: widget.personality,
-            dialect: dialect,
-            observedState: _observedPetState,
-            clientId: clientId,
-          );
-          if (!mounted) return;
-          if (rewritten != null) {
-            spokenComments = rewritten;
-          }
+          final spokenComments = comments.take(8).toList(growable: false);
           _startCommentRotation(spokenComments, result.species);
+          unawaited(_showEntertainmentNoticeOnce());
+          unawaited(_generateGreeting());
+          _lastObservationAt = DateTime.now();
+          _scheduleObservation();
           unawaited(_startPresenceMonitoring());
         }
       } else if (result.detectedSpecies.isNotEmpty) {
@@ -473,6 +494,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         _comments = const [];
         _conversationMode = false;
         _observedPetState = '';
+        _observationTimer?.cancel();
         _conversationHistory.clear();
         _comment = '';
         _showComment = false;
@@ -530,7 +552,223 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       _showComment = true;
       _visionStatus = '$speciesを検出しました';
     });
-    _scheduleAmbientHide();
+    _scheduleCurrentUtteranceHide();
+  }
+
+  void _scheduleCurrentUtteranceHide() {
+    _commentTimer?.cancel();
+    _commentTimer = Timer(Duration(seconds: 8 + _random.nextInt(8)), () {
+      if (!mounted) return;
+      setState(() => _showComment = false);
+    });
+  }
+
+  Future<void> _showEntertainmentNoticeOnce() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('pet_mood.entertainment_notice.v1') == true || !mounted) {
+      return;
+    }
+    await prefs.setBool('pet_mood.entertainment_notice.v1', true);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('気持ちの表現について'),
+        content: const Text(
+          'ペットの気持ちは、画面に見える姿勢や様子からAIが想像したエンタメ表現です。'
+          '病気や体調を診断するものではありません。',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('わかりました'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<PetChatContext> _chatContext() async {
+    final profile = _voiceProfile ??
+        PetVoiceProfile(
+          preset: widget.personality,
+          firstPerson: 'ぼく',
+          ending: '',
+          ownerCall: widget.ownerName.trim().isEmpty
+              ? '飼い主さん'
+              : widget.ownerName.trim(),
+        );
+    return PetChatContext(
+      petName: widget.petName,
+      species: widget.species,
+      preset: profile.preset,
+      firstPerson: profile.firstPerson,
+      ending: profile.ending,
+      ownerCall: profile.ownerCall,
+      dialect: await _effectiveDialect(),
+      pose: _observedPetState,
+      mood: _petMood,
+      expression: _petExpression,
+      previousPose: _previousPose,
+      previousMood: _previousMood,
+    );
+  }
+
+  Future<void> _generateGreeting() async {
+    final clientId = _visionClientId;
+    if (clientId == null || _comments.isEmpty) return;
+    final greeting = await _aiService.chat(
+      kind: PetChatKind.greet,
+      context: await _chatContext(),
+      clientId: clientId,
+      history: _conversationHistory,
+    );
+    if (!mounted || greeting == null) return;
+    _conversationHistory.add({
+      'role': 'pet',
+      'content': greeting,
+      'kind': PetChatKind.greet.name,
+    });
+    _trimConversationHistory();
+    _showAiUtterance(
+      greeting,
+      style: _BubbleStyle.speech,
+      status: '${widget.petName.isEmpty ? 'ペット' : widget.petName}から話しかけています',
+    );
+  }
+
+  void _scheduleObservation({Duration? after}) {
+    _observationTimer?.cancel();
+    if (!mounted || _comments.isEmpty) return;
+    final delay = after ?? Duration(seconds: 35 + _random.nextInt(21));
+    _observationTimer = Timer(delay, () => unawaited(_observePetState()));
+  }
+
+  Future<void> _observePetState() async {
+    final controller = _controller;
+    final clientId = _visionClientId;
+    if (_observationBusy ||
+        _visionBusy ||
+        _listening ||
+        _replyBusy ||
+        controller == null ||
+        !controller.value.isInitialized ||
+        clientId == null ||
+        _comments.isEmpty) {
+      _scheduleObservation(after: const Duration(seconds: 10));
+      return;
+    }
+
+    _observationBusy = true;
+    XFile? frame;
+    try {
+      await _stopPresenceMonitoring();
+      frame = await controller.takePicture();
+      final observationBytes = await resizeImageForObservation(
+        await frame.readAsBytes(),
+      );
+      final result = await _aiService.analyzeImage(
+        frames: [observationBytes],
+        species: widget.species,
+        personality: widget.personality,
+        dialect: await _effectiveDialect(),
+        clientId: clientId,
+      );
+      if (!mounted || result == null || !result.petDetected) return;
+
+      final oldPoseKey = _poseKey;
+      final oldMoodKey = _moodKey;
+      final poseChanged = oldPoseKey.isNotEmpty &&
+          result.poseKey.isNotEmpty &&
+          oldPoseKey != result.poseKey;
+      final moodChanged = oldMoodKey.isNotEmpty &&
+          result.moodKey.isNotEmpty &&
+          result.moodKey != 'unknown' &&
+          oldMoodKey != result.moodKey;
+
+      _previousPose = _observedPetState;
+      _previousMood = _petMood;
+      _observedPetState = result.observedState;
+      _poseKey = result.poseKey;
+      _moodKey = result.moodKey;
+      _petMood = result.mood;
+      _petExpression = result.expression;
+      _lastObservationAt = DateTime.now();
+
+      if (!poseChanged && !moodChanged) return;
+      final monologue = await _aiService.chat(
+        kind: PetChatKind.monologue,
+        context: await _chatContext(),
+        clientId: clientId,
+        history: _conversationHistory,
+      );
+      if (!mounted || monologue == null) return;
+      _conversationHistory.add({
+        'role': 'pet',
+        'content': monologue,
+        'kind': PetChatKind.monologue.name,
+      });
+      _trimConversationHistory();
+      _showAiUtterance(
+        monologue,
+        style: _BubbleStyle.thought,
+        status: '姿勢や様子が変わりました',
+      );
+    } on Object catch (error) {
+      debugPrint('Periodic pet observation failed: $error');
+    } finally {
+      if (frame != null) {
+        try {
+          await cleanupCameraFrame(frame.path);
+        } on Object catch (error) {
+          debugPrint('Periodic camera frame cleanup failed: $error');
+        }
+      }
+      _observationBusy = false;
+      if (mounted && _comments.isNotEmpty) {
+        unawaited(_startPresenceMonitoring());
+        _scheduleObservation();
+      }
+    }
+  }
+
+  void _showAiUtterance(
+    String text, {
+    required _BubbleStyle style,
+    required String status,
+  }) {
+    _commentTimer?.cancel();
+    setState(() {
+      _comment = text;
+      _bubbleStyle = style;
+      _showComment = true;
+      _visionStatus = status;
+    });
+    unawaited(_speechService.speak(text));
+    _scheduleCurrentUtteranceHide();
+  }
+
+  void _trimConversationHistory() {
+    while (_conversationHistory.length > 20) {
+      _conversationHistory.removeAt(0);
+    }
+  }
+
+  Future<void> _openVoiceSettings() async {
+    final initial = _voiceProfile ??
+        await PetVoiceProfile.load(
+          defaultPreset: widget.personality,
+          ownerName: widget.ownerName,
+        );
+    if (!mounted) return;
+    final profile = await Navigator.of(context).push<PetVoiceProfile>(
+      MaterialPageRoute(
+        builder: (_) => PetVoiceSettingsPage(initial: initial),
+      ),
+    );
+    if (profile != null && mounted) {
+      setState(() => _voiceProfile = profile);
+    }
   }
 
   void _scheduleAmbientHide() {
@@ -594,16 +832,13 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       return;
     }
     final now = DateTime.now();
-    final last = _lastMotionCommentAt;
-    if (last != null && now.difference(last) < const Duration(seconds: 15)) {
+    final last = _lastObservationAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 30)) {
       return;
     }
-    _lastMotionCommentAt = now;
-    if (_showComment) {
-      _motionCommentPending = true;
-      return;
-    }
-    _showNextAmbientComment();
+    // 動きを検出しても台詞を直接出さない。最低30秒を空けてAI観察を前倒しし、
+    // 姿勢または気分が実際に変わったときだけ独り言を生成する。
+    _scheduleObservation(after: const Duration(seconds: 2));
   }
 
   Future<void> _onTalkPressed() async {
@@ -614,13 +849,13 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       }
       return;
     }
-    // 音声認識はiOSネイティブ実装のみ。Webでは端末設定への誘導が誤案内になる。
-    if (kIsWeb) {
-      setState(() => _visionStatus = '音声会話はアプリ版で利用できます');
-      return;
-    }
     if (_comments.isEmpty) {
       setState(() => _visionStatus = '先にペットを判定してね');
+      return;
+    }
+
+    if (!_speechService.isAvailable) {
+      await _promptForTextMessage();
       return;
     }
 
@@ -659,6 +894,11 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     }
     if (!await _speechService.requestPermission()) {
       if (!mounted) return;
+      if (kIsWeb) {
+        setState(() => _visionStatus = '音声認識に対応していないため文字で話しかけてね');
+        await _promptForTextMessage();
+        return;
+      }
       setState(() => _visionStatus = 'マイク・音声認識の許可が必要です');
       await showDialog<void>(
         context: context,
@@ -703,6 +943,55 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       return;
     }
 
+    await _sendOwnerMessage(transcript);
+  }
+
+  Future<void> _promptForTextMessage() async {
+    if (_comments.isEmpty) {
+      if (mounted) setState(() => _visionStatus = '先にペットを判定してね');
+      return;
+    }
+    final controller = TextEditingController();
+    final message = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('ペットに話しかける'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 300,
+          minLines: 1,
+          maxLines: 4,
+          textInputAction: TextInputAction.send,
+          decoration: const InputDecoration(
+            hintText: '話しかけたいことを入力',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (value) {
+            final trimmed = value.trim();
+            if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final trimmed = controller.text.trim();
+              if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
+            },
+            child: const Text('送る'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (message != null && mounted) await _sendOwnerMessage(message);
+  }
+
+  Future<void> _sendOwnerMessage(String message) async {
     final clientId = _visionClientId;
     if (clientId == null) return;
     setState(() {
@@ -710,14 +999,12 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       _comment = 'うーん…';
       _bubbleStyle = _BubbleStyle.thought;
       _showComment = true;
-      _visionStatus = '「${_shortStatusText(transcript)}」に返事を考えています…';
+      _visionStatus = '「${_shortStatusText(message)}」に返事を考えています…';
     });
-    final reply = await _aiService.generateReply(
-      message: transcript,
-      species: widget.species,
-      personality: widget.personality,
-      dialect: await _effectiveDialect(),
-      observedState: _observedPetState,
+    final reply = await _aiService.chat(
+      kind: PetChatKind.reply,
+      message: message,
+      context: await _chatContext(),
       clientId: clientId,
       history: _conversationHistory,
     );
@@ -729,12 +1016,10 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     }
     _conversationMode = true;
     _conversationHistory.addAll([
-      {'role': 'owner', 'content': transcript},
-      {'role': 'pet', 'content': reply},
+      {'role': 'owner', 'content': message, 'kind': PetChatKind.reply.name},
+      {'role': 'pet', 'content': reply, 'kind': PetChatKind.reply.name},
     ]);
-    while (_conversationHistory.length > 8) {
-      _conversationHistory.removeAt(0);
-    }
+    _trimConversationHistory();
     _showConversationReply(reply);
   }
 
@@ -752,10 +1037,12 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       _showComment = true;
       _visionStatus = '${widget.petName.isEmpty ? 'ペット' : widget.petName}からの返事';
     });
+    unawaited(_speechService.speak(reply));
     _commentTimer = Timer(Duration(seconds: 8 + _random.nextInt(9)), () {
       if (!mounted) return;
       setState(() {
         _showComment = false;
+        _conversationMode = false;
         _visionStatus = 'マイクを押して続きを話しかけてね';
       });
     });
@@ -1021,6 +1308,11 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
           child: Text(titleText, maxLines: 1),
         ),
         actions: [
+          IconButton(
+            tooltip: 'ペットの話し方を設定',
+            onPressed: () => unawaited(_openVoiceSettings()),
+            icon: const Icon(Icons.record_voice_over_outlined),
+          ),
           if (_visionConsentChecked && !_visionConsentGranted)
             IconButton(
               tooltip: 'AI画像判定を有効にする',
@@ -1161,21 +1453,27 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
                   SizedBox(
                     width: 56,
                     height: 56,
-                    child: IconButton.filled(
-                      tooltip: _listening ? '聞き取りを止める' : 'ペットに話しかける',
-                      onPressed: _replyBusy || _visionBusy
+                    child: GestureDetector(
+                      onLongPress: _replyBusy || _visionBusy
                           ? null
-                          : () => unawaited(_onTalkPressed()),
-                      icon: _replyBusy
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : Icon(_listening ? Icons.stop : Icons.mic),
+                          : () => unawaited(_promptForTextMessage()),
+                      child: IconButton.filled(
+                        tooltip:
+                            _listening ? '聞き取りを止める' : 'ペットに話しかける（長押しで文字入力）',
+                        onPressed: _replyBusy || _visionBusy
+                            ? null
+                            : () => unawaited(_onTalkPressed()),
+                        icon: _replyBusy
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Icon(_listening ? Icons.stop : Icons.mic),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),

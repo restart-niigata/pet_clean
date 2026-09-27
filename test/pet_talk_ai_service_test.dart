@@ -78,7 +78,9 @@ void main() {
         final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
 
         expect(request.method, 'POST');
-        expect(body['imagesBase64'], [base64Encode([1, 2, 3])]);
+        expect(body['imagesBase64'], [
+          base64Encode([1, 2, 3])
+        ]);
         expect(body['species'], '犬');
         expect(body['personality'], '元気');
         expect(body['dialect'], '標準語');
@@ -92,6 +94,10 @@ void main() {
           'observedState': '伏せてこちらを見ている',
           'comment': 'お散歩まだかな？',
           'comments': ['お散歩まだかな？', '一緒に遊ぼう！', '今日は何する？'],
+          'poseKey': 'lying',
+          'moodKey': 'relaxed',
+          'mood': 'リラックスしているのかも',
+          'expression': '目を細めている',
         }));
         await request.response.close();
       }();
@@ -100,7 +106,9 @@ void main() {
         endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
       );
       final result = await service.analyzeImage(
-        frames: [Uint8List.fromList([1, 2, 3])],
+        frames: [
+          Uint8List.fromList([1, 2, 3])
+        ],
         species: '犬',
         personality: '元気',
         dialect: '標準語',
@@ -115,6 +123,10 @@ void main() {
       expect(result.observedState, '伏せてこちらを見ている');
       expect(result.comment, 'お散歩まだかな？');
       expect(result.comments, ['お散歩まだかな？', '一緒に遊ぼう！', '今日は何する？']);
+      expect(result.poseKey, 'lying');
+      expect(result.moodKey, 'relaxed');
+      expect(result.mood, 'リラックスしているのかも');
+      expect(result.expression, '目を細めている');
     });
 
     test('reports a detected species that differs from the selection',
@@ -142,7 +154,9 @@ void main() {
         endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
       );
       final result = await service.analyzeImage(
-        frames: [Uint8List.fromList([1, 2, 3])],
+        frames: [
+          Uint8List.fromList([1, 2, 3])
+        ],
         species: 'フクロモモンガ',
         personality: '元気',
         dialect: '標準語',
@@ -169,7 +183,9 @@ void main() {
       );
 
       final result = await service.analyzeImage(
-        frames: [Uint8List.fromList([1, 2, 3])],
+        frames: [
+          Uint8List.fromList([1, 2, 3])
+        ],
         species: 'フクロモモンガ',
         personality: '元気',
         dialect: '標準語',
@@ -248,6 +264,63 @@ void main() {
       );
       await handled;
       expect(result, '追いかけっこしよや！');
+    });
+
+    test('posts persona, state and recent history to the chat endpoint',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final handled = () async {
+        final request = await server.first;
+        expect(request.uri.path, '/v1/chat');
+        final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+        expect(body['kind'], 'reply');
+        expect(body['message'], 'おやつ食べる？');
+        expect(body['persona'], {
+          'petName': 'こむぎ',
+          'species': '犬',
+          'preset': 'ツンデレ',
+          'firstPerson': 'おれ',
+          'ending': 'ワン',
+          'ownerCall': 'ママ',
+          'dialect': '関西弁',
+        });
+        expect((body['state'] as Map)['pose'], '横になっている');
+        expect((body['history'] as List).single, {
+          'role': 'pet',
+          'content': '眠いな',
+          'kind': 'monologue',
+        });
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'utterance': '今はごろんとしてたいワン'}));
+        await request.response.close();
+      }();
+      final service = PetTalkAiService(
+        endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
+      );
+      const context = PetChatContext(
+        petName: 'こむぎ',
+        species: '犬',
+        preset: 'ツンデレ',
+        firstPerson: 'おれ',
+        ending: 'ワン',
+        ownerCall: 'ママ',
+        dialect: '関西弁',
+        pose: '横になっている',
+        mood: '眠いのかも',
+        expression: '目を閉じている',
+      );
+      final result = await service.chat(
+        kind: PetChatKind.reply,
+        context: context,
+        clientId: '123e4567-e89b-42d3-a456-426614174000',
+        message: 'おやつ食べる？',
+        history: const [
+          {'role': 'pet', 'content': '眠いな', 'kind': 'monologue'},
+        ],
+      );
+      await handled;
+      expect(result, '今はごろんとしてたいワン');
     });
   });
 }

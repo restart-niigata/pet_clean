@@ -13,6 +13,10 @@ class PetVisionResult {
     this.observedState = '',
     this.detectedSpecies = '',
     this.comments = const [],
+    this.poseKey = '',
+    this.moodKey = '',
+    this.mood = '',
+    this.expression = '',
   });
 
   final bool petDetected;
@@ -22,6 +26,47 @@ class PetVisionResult {
   final String observedState;
   final String detectedSpecies;
   final List<String> comments;
+
+  /// 姿勢・気分の変化判定に使う正規化キー（例: sleeping / relaxed）。
+  final String poseKey;
+  final String moodKey;
+
+  /// 断定しない日本語の気分推測（例: 眠いのかも）。
+  final String mood;
+  final String expression;
+}
+
+enum PetChatKind { greet, reply, monologue }
+
+/// 会話で使うペットの人格と、そのとき見えている状態。
+class PetChatContext {
+  const PetChatContext({
+    required this.petName,
+    required this.species,
+    required this.preset,
+    required this.firstPerson,
+    required this.ending,
+    required this.ownerCall,
+    required this.dialect,
+    this.pose = '',
+    this.mood = '',
+    this.expression = '',
+    this.previousPose = '',
+    this.previousMood = '',
+  });
+
+  final String petName;
+  final String species;
+  final String preset;
+  final String firstPerson;
+  final String ending;
+  final String ownerCall;
+  final String dialect;
+  final String pose;
+  final String mood;
+  final String expression;
+  final String previousPose;
+  final String previousMood;
 }
 
 enum PetVisionFailure {
@@ -240,6 +285,13 @@ class PetTalkAiService {
         observedState: detected ? observedState : '',
         detectedSpecies: detected ? detectedSpecies : mismatchedSpecies,
         comments: detected ? comments : const [],
+        poseKey:
+            detected ? _sanitize(decoded['poseKey']?.toString() ?? '') : '',
+        moodKey:
+            detected ? _sanitize(decoded['moodKey']?.toString() ?? '') : '',
+        mood: detected ? _sanitize(decoded['mood']?.toString() ?? '') : '',
+        expression:
+            detected ? _sanitize(decoded['expression']?.toString() ?? '') : '',
       );
     } on TimeoutException {
       lastVisionFailure = PetVisionFailure.timeout;
@@ -339,6 +391,65 @@ class PetTalkAiService {
       if (decoded is! Map<String, dynamic>) return null;
       final reply = _sanitize(decoded['reply']?.toString() ?? '');
       return reply.isEmpty ? null : reply;
+    } on Object {
+      return null;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// `/v1/chat` でペットの発話（話しかけ・返事・独り言）を1〜2文生成する。
+  Future<String?> chat({
+    required PetChatKind kind,
+    required PetChatContext context,
+    required String clientId,
+    String message = '',
+    List<Map<String, String>> history = const [],
+  }) async {
+    if (!isConfigured) return null;
+    if (kind == PetChatKind.reply && message.trim().isEmpty) return null;
+    final uri = _endpointFor('/v1/chat');
+    if (uri == null || !_isAllowedEndpoint(uri)) return null;
+    final client = _httpClientFactory();
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: const {
+              'content-type': 'application/json',
+              'accept': 'application/json',
+            },
+            body: jsonEncode({
+              'clientId': clientId,
+              'kind': kind.name,
+              if (kind == PetChatKind.reply) 'message': _sanitize(message),
+              'persona': {
+                'petName': context.petName,
+                'species': context.species,
+                'preset': context.preset,
+                'firstPerson': context.firstPerson,
+                'ending': context.ending,
+                'ownerCall': context.ownerCall,
+                'dialect': context.dialect,
+              },
+              'state': {
+                'pose': context.pose,
+                'mood': context.mood,
+                'expression': context.expression,
+                'previousPose': context.previousPose,
+                'previousMood': context.previousMood,
+              },
+              'history': history.length > 20
+                  ? history.sublist(history.length - 20)
+                  : history,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic>) return null;
+      final utterance = _sanitize(decoded['utterance']?.toString() ?? '');
+      return utterance.isEmpty ? null : utterance;
     } on Object {
       return null;
     } finally {
