@@ -82,6 +82,8 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
   bool _listening = false;
   bool _replyBusy = false;
   bool _conversationMode = false;
+  // Scout 定期観察の連続未検出回数。2 回連続で外れたら在席を解除する。
+  int _observationMisses = 0;
   _AmbientPace _ambientPace = _AmbientPace.balanced;
   int _chattyBurstRemaining = 0;
   bool _motionCommentPending = false;
@@ -377,6 +379,7 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         _moodKey = result.moodKey;
         _petMood = result.mood;
         _petExpression = result.expression;
+        _observationMisses = 0;
         final comments = await _localCommentService.load(
           species: widget.species,
           personality: widget.personality,
@@ -484,23 +487,13 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
       if (present == null || !mounted) return;
       if (present) {
         _consecutivePresenceMisses = 0;
+        _observationMisses = 0;
         return;
       }
 
       _consecutivePresenceMisses++;
       if (_consecutivePresenceMisses < 4) return;
-      _commentTimer?.cancel();
-      setState(() {
-        _comments = const [];
-        _conversationMode = false;
-        _observedPetState = '';
-        _observationTimer?.cancel();
-        _conversationHistory.clear();
-        _comment = '';
-        _showComment = false;
-        _visionStatus = 'ペットが画面から外れました。もう一度判定してね';
-      });
-      unawaited(_stopPresenceMonitoring());
+      _clearPetState(status: 'ペットが画面から外れました。もう一度判定してね');
     } finally {
       _presenceCheckBusy = false;
     }
@@ -516,6 +509,27 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
     } on Object catch (error) {
       debugPrint('Local pet presence monitoring failed to stop: $error');
     }
+  }
+
+  void _clearPetState({required String status}) {
+    _commentTimer?.cancel();
+    _observationTimer?.cancel();
+    unawaited(_stopPresenceMonitoring());
+    setState(() {
+      _comments = const [];
+      _conversationMode = false;
+      _observedPetState = '';
+      _poseKey = '';
+      _moodKey = '';
+      _petMood = '';
+      _petExpression = '';
+      _previousPose = '';
+      _previousMood = '';
+      _conversationHistory.clear();
+      _comment = '';
+      _showComment = false;
+      _visionStatus = status;
+    });
   }
 
   void _startCommentRotation(List<String> rawComments, String species) {
@@ -674,7 +688,15 @@ class _PreviewPageState extends State<PreviewPage> with WidgetsBindingObserver {
         dialect: await _effectiveDialect(),
         clientId: clientId,
       );
-      if (!mounted || result == null || !result.petDetected) return;
+      if (!mounted) return;
+      if (result == null || !result.petDetected) {
+        _observationMisses++;
+        if (_observationMisses >= 2) {
+          _clearPetState(status: 'ペットが画面から外れました。もう一度判定してね');
+        }
+        return;
+      }
+      _observationMisses = 0;
 
       final oldPoseKey = _poseKey;
       final oldMoodKey = _moodKey;
