@@ -275,6 +275,16 @@ describe("validateChatRequest", () => {
     expect(chat.persona).toMatchObject({ preset: "甘えん坊", ownerCall: "ご主人", firstPerson: "ぼく" });
     expect(normalizePreset("おっとり")).toBe("のんびり");
   });
+
+  it("accepts greet and monologue without a message", () => {
+    const greet = validateChatRequest(chatBody({ kind: "greet", message: undefined }));
+    expect(greet.kind).toBe("greet");
+    expect(greet.message).toBe("");
+
+    const monologue = validateChatRequest(chatBody({ kind: "monologue", message: undefined }));
+    expect(monologue.kind).toBe("monologue");
+    expect(monologue.message).toBe("");
+  });
 });
 
 describe("buildChatMessages", () => {
@@ -312,6 +322,11 @@ describe("buildChatMessages", () => {
     const messages = buildChatMessages({ ...base, kind: "greet", message: "" });
     expect(messages.at(-1)?.content).toContain("自分からご主人に話しかける");
   });
+
+  it("keeps greetings from using the owner's message", () => {
+    const messages = buildChatMessages({ ...base, kind: "greet", message: "" });
+    expect(messages.at(-1)?.content).not.toContain("おやつ食べる？");
+  });
 });
 
 describe("finalizeUtterance", () => {
@@ -326,6 +341,12 @@ describe("finalizeUtterance", () => {
     const monologue = { ...chat, kind: "monologue" as const, message: "" };
     expect(finalizeUtterance({ utterance: "ほら、眠いな気がする" }, monologue)).toBe(
       "眠い気がする",
+    );
+    expect(finalizeUtterance({ utterance: "ねえ、ちょっと寒いな" }, monologue)).toBe(
+      "ちょっと寒いな",
+    );
+    expect(finalizeUtterance({ utterance: "聞いて、窓の外が気になる" }, monologue)).toBe(
+      "窓の外が気になる",
     );
   });
 

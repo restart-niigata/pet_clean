@@ -55,6 +55,11 @@
 
 画像縮小前の実測値を定期観察にも当てた保守的な計算で、10,000 neurons/日の約13%。通信再試行や長い会話履歴を考慮して2倍の安全率を置いても約2,540 neurons/日。運用時はWorkers AIダッシュボードの実測を確認する。
 
+## テスト
+
+- Worker: `cd worker/pet-vision-api && npm test` で `/v1/chat` の検証（greet / reply / monologue のリクエスト検証、プロンプト内容、独り言の呼びかけ除去、健康断定の差し替えなど）を追加。
+- Flutter: `flutter test` で `PetTalkAiService.chat()` の greet/monologue 送信、履歴トリム、不正エンドポイント時の null 返却を追加。
+
 ## previewデプロイ
 
 本番へ反映せず、次だけを使用する。

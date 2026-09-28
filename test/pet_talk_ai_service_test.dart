@@ -322,5 +322,110 @@ void main() {
       await handled;
       expect(result, '今はごろんとしてたいワン');
     });
+
+    test('sends greet and monologue without owner message', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+
+      final requestHandled = () async {
+        final request = await server.first;
+        final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+        expect(body['kind'], 'greet');
+        expect(body.containsKey('message'), isFalse);
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'utterance': 'なでてほしいな'}));
+        await request.response.close();
+      }();
+
+      final service = PetTalkAiService(
+        endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
+      );
+      const context = PetChatContext(
+        petName: 'こむぎ',
+        species: '犬',
+        preset: '甘えん坊',
+        firstPerson: 'ぼく',
+        ending: '',
+        ownerCall: 'ママ',
+        dialect: '標準語',
+      );
+      final result = await service.chat(
+        kind: PetChatKind.greet,
+        context: context,
+        clientId: '123e4567-e89b-42d3-a456-426614174000',
+      );
+      await requestHandled;
+      expect(result, 'なでてほしいな');
+    });
+
+    test('trims history to the most recent 20 items', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+
+      final requestHandled = () async {
+        final request = await server.first;
+        final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+        expect((body['history'] as List).length, 20);
+        expect((body['history'] as List).first, {
+          'role': 'owner',
+          'content': 'message-6',
+        });
+        expect((body['history'] as List).last, {
+          'role': 'pet',
+          'content': 'message-25',
+        });
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'utterance': '覚えてるよ'}));
+        await request.response.close();
+      }();
+
+      final service = PetTalkAiService(
+        endpoint: 'http://127.0.0.1:${server.port}/v1/analyze',
+      );
+      const context = PetChatContext(
+        petName: 'こむぎ',
+        species: '犬',
+        preset: '元気',
+        firstPerson: 'ぼく',
+        ending: '',
+        ownerCall: 'ママ',
+        dialect: '標準語',
+      );
+      final history = <Map<String, String>>[
+        for (var i = 0; i < 26; i++)
+          {
+            'role': i.isEven ? 'owner' : 'pet',
+            'content': 'message-$i',
+          },
+      ];
+      final result = await service.chat(
+        kind: PetChatKind.reply,
+        context: context,
+        clientId: '123e4567-e89b-42d3-a456-426614174000',
+        message: '覚えてる？',
+        history: history,
+      );
+      await requestHandled;
+      expect(result, '覚えてるよ');
+    });
+
+    test('returns null for chat when endpoint is insecure', () async {
+      final service = PetTalkAiService(endpoint: 'http://example.com/v1/analyze');
+      const context = PetChatContext(
+        petName: 'こむぎ',
+        species: '犬',
+        preset: '元気',
+        firstPerson: 'ぼく',
+        ending: '',
+        ownerCall: 'ママ',
+        dialect: '標準語',
+      );
+      final result = await service.chat(
+        kind: PetChatKind.monologue,
+        context: context,
+        clientId: '123e4567-e89b-42d3-a456-426614174000',
+      );
+      expect(result, isNull);
+    });
   });
 }
