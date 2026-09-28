@@ -46,14 +46,21 @@
 
 想定は1日あたり10分×3回。観察間隔の平均45秒として、定期観察は約13回/セッション（39回/日）になる。
 
+Workers AI 現行単価（2026年9月）:
+
+- Llama 4 Scout: 24,545 neurons/M input tokens / 77,273 neurons/M output tokens
+- Llama 3.1 8B instruct-fp8-fast: 4,119 neurons/M input tokens / 34,868 neurons/M output tokens
+
+長辺336pxの観察画像＋プロンプトで約1,000 input tokens、JSON出力で約100 output tokensと仮定すると、Scout 1回は約32 neurons。8B会話はシステムプロンプト＋履歴で約800 input tokens、出力で約50 tokensと仮定すると約5 neurons/回となる。
+
 | 処理 | 保守的な単価 | 1日の回数 | 概算 |
 | --- | ---: | ---: | ---: |
-| 初回Scout判定（最大3枚） | 21.2 neurons/枚 | 9枚 | 191 neurons |
-| 定期Scout観察 | 21.2 neurons/回 | 39回 | 827 neurons |
-| 8B会話（挨拶・返事・独り言） | 6 neurons/回 | 42回 | 252 neurons |
-| 合計 |  |  | **約1,270 neurons/日** |
+| 初回Scout判定（最大3枚） | 32 neurons/枚 | 9枚 | 288 neurons |
+| 定期Scout観察 | 32 neurons/回 | 39回 | 1,248 neurons |
+| 8B会話（挨拶・返事・独り言） | 5 neurons/回 | 42回 | 210 neurons |
+| 合計 |  |  | **約1,750 neurons/日** |
 
-画像縮小前の実測値を定期観察にも当てた保守的な計算で、10,000 neurons/日の約13%。通信再試行や長い会話履歴を考慮して2倍の安全率を置いても約2,540 neurons/日。運用時はWorkers AIダッシュボードの実測を確認する。
+10,000 neurons/日の無料枠に対し約17.5%。通信再試行や長い会話履歴、画像サイズの変動を考慮して2倍の安全率を置いても約3,500 neurons/日。運用時はWorkers AIダッシュボードの実測を確認する。
 
 ## テスト
 
