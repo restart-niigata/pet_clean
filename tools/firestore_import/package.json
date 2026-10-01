@@ -1,0 +1,12 @@
+{
+  "name": "pet-talk-firestore-import",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node import-comments.mjs",
+    "import": "node import-comments.mjs --apply"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.4.0"
+  }
+}

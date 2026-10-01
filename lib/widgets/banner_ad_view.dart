@@ -1,8 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+
 import '../services/ad_service.dart';
 
-/// 画面下部に常駐するバナー。未読み込み時も高さを確保して「消えない」ようにする。
 class BannerAdView extends StatefulWidget {
   const BannerAdView({super.key});
 
@@ -12,61 +14,117 @@ class BannerAdView extends StatefulWidget {
 
 class _BannerAdViewState extends State<BannerAdView> {
   BannerAd? _ad;
-  bool _loaded = false;
+  Timer? _retryTimer;
+  bool _loading = false;
+  int _failureCount = 0;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    AdService.canRequestAds.addListener(_handleAvailabilityChanged);
   }
 
-  void _load() {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _handleAvailabilityChanged();
+  }
+
+  void _handleAvailabilityChanged() {
+    if (AdService.canRequestAds.value && _ad == null && !_loading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _load();
+      });
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _load() async {
+    if (!mounted || !AdService.canRequestAds.value || _loading || _ad != null) {
+      return;
+    }
+
+    _loading = true;
+    final width = MediaQuery.sizeOf(context).width.truncate();
+    AdSize? size;
+    try {
+      size =
+          await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
+    } on Object catch (error) {
+      debugPrint('Banner size lookup failed: $error');
+    }
+    if (!mounted || size == null) {
+      _loading = false;
+      _scheduleRetry();
+      return;
+    }
+
     final ad = BannerAd(
-      adUnitId: AdService.bannerUnitId, // 本番/テストは AdService 側で管理
-      size: AdSize.banner,
+      adUnitId: AdService.bannerUnitId,
+      size: size,
       request: const AdRequest(),
       listener: BannerAdListener(
-        onAdLoaded: (ad) {
-          if (!mounted) return;
+        onAdLoaded: (loadedAd) {
+          if (!mounted) {
+            loadedAd.dispose();
+            return;
+          }
           setState(() {
-            _ad = ad as BannerAd;
-            _loaded = true;
+            _ad = loadedAd as BannerAd;
+            _loading = false;
+            _failureCount = 0;
           });
         },
-        onAdFailedToLoad: (ad, err) {
-          ad.dispose();
-          // 失敗しても高さは維持（真っ白）。数秒後に再試行。
-          Future.delayed(const Duration(seconds: 10), () {
-            if (mounted) _load();
-          });
+        onAdFailedToLoad: (failedAd, error) {
+          failedAd.dispose();
+          _loading = false;
+          _failureCount++;
+          debugPrint('Banner load failed: ${error.message}');
+          _scheduleRetry();
         },
       ),
     );
-    ad.load();
+    try {
+      await ad.load();
+    } on Object catch (error) {
+      ad.dispose();
+      _loading = false;
+      _failureCount++;
+      debugPrint('Banner load error: $error');
+      _scheduleRetry();
+    }
+  }
+
+  void _scheduleRetry() {
+    _retryTimer?.cancel();
+    final seconds = switch (_failureCount) {
+      <= 0 => 30,
+      1 => 60,
+      _ => 300,
+    };
+    _retryTimer = Timer(Duration(seconds: seconds), _load);
   }
 
   @override
   void dispose() {
+    AdService.canRequestAds.removeListener(_handleAvailabilityChanged);
+    _retryTimer?.cancel();
     _ad?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // AdSize.banner の高さに少し余白を足して常に確保
-    const reservedHeight = 60.0;
+    final ad = _ad;
+    if (!AdService.canRequestAds.value || ad == null) {
+      return const SizedBox.shrink();
+    }
 
     return SizedBox(
-      height: reservedHeight,
-      width: double.infinity,
-      child: Center(
-        child: _loaded && _ad != null
-            ? AdWidget(ad: _ad!)
-            : const SizedBox(
-                height: 50,
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              ),
-      ),
+      width: ad.size.width.toDouble(),
+      height: ad.size.height.toDouble(),
+      child: AdWidget(ad: ad),
     );
   }
 }

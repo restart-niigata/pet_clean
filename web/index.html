@@ -16,18 +16,18 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="ペットが性格や方言に合わせてひとこと話す、ぺっとーく。">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="pet_clean">
+  <meta name="apple-mobile-web-app-title" content="ぺっとーく">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png">
 
-  <title>pet_clean</title>
+  <title>ぺっとーく</title>
   <link rel="manifest" href="manifest.json">
   <style id="splash-screen-style">
     html {
@@ -93,6 +93,60 @@
       document.getElementById("splash-branding")?.remove();
       document.body.style.background = "transparent";
     }
+  </script>
+  <script>
+    (() => {
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      let recognition = null;
+      let latest = '';
+      window.petTalkSpeech = {
+        isSupported: !!Recognition,
+        start(onResult, onError) {
+          if (!Recognition) {
+            onError('このブラウザは音声認識に対応していません。');
+            return;
+          }
+          try {
+            recognition?.abort();
+            latest = '';
+            recognition = new Recognition();
+            recognition.lang = 'ja-JP';
+            recognition.interimResults = true;
+            recognition.continuous = false;
+            recognition.maxAlternatives = 1;
+            recognition.onresult = (event) => {
+              let finalResult = false;
+              for (let i = event.resultIndex; i < event.results.length; i++) {
+                const text = event.results[i][0]?.transcript?.trim();
+                if (text) latest = text;
+                finalResult = finalResult || event.results[i].isFinal;
+              }
+              onResult(latest, finalResult);
+            };
+            recognition.onerror = (event) => onError(event.error || '音声認識に失敗しました。');
+            recognition.onend = () => {
+              if (latest) onResult(latest, true);
+              recognition = null;
+            };
+            recognition.start();
+          } catch (error) {
+            recognition = null;
+            onError(String(error));
+          }
+        },
+        stop() {
+          try { recognition?.stop(); } catch (_) {}
+        },
+        speak(text) {
+          if (!window.speechSynthesis || !text) return;
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = 'ja-JP';
+          utterance.rate = 1.02;
+          window.speechSynthesis.speak(utterance);
+        }
+      };
+    })();
   </script>
   <meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport">
 </head>

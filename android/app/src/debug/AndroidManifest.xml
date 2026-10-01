@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <application
-        android:label="pet_clean (debug)"
-        tools:replace="android:label" />
+        android:label="ぺっとーく (debug)"
+        android:usesCleartextTraffic="true"
+        tools:replace="android:label,android:usesCleartextTraffic" />
 </manifest>

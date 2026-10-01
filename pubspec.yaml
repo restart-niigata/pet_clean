@@ -1,6 +1,7 @@
-﻿name: pet_clean
+name: pet_clean
 description: Pet Clean app
 publish_to: "none"
+version: 1.0.0+1
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -20,11 +21,15 @@ dependencies:
   screenshot: 3.0.0
   cupertino_icons: 1.0.5
   url_launcher: ^6.3.2
+  http: ^1.4.0
 
 dev_dependencies:
   flutter_lints: 6.0.0
+  test: ^1.25.15
 
 flutter:
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
   assets:
     - assets/
